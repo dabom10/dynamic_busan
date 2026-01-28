@@ -1,0 +1,9 @@
+# ROS / colcon build outputs
+build/
+install/
+log/
+
+
+__pycache__/
+*.pyc
+
