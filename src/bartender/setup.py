@@ -23,7 +23,8 @@ setup(
         ],
     },
     entry_points={
-        'console_scripts': [
+    'console_scripts': [
+        'shake = bartender.shake.shake_node:main',
         ],
-    },
+}   ,
 )
