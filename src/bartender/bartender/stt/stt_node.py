@@ -9,15 +9,27 @@ from rclpy.node import Node
 from datetime import datetime
 from bartender.db.db_client import DBClient
 
+from openai import OpenAI
+import sounddevice as sd
+import scipy.io.wavfile as wav
+import tempfile
+import os
+from dotenv import load_dotenv
+from konlpy.tag import Komoran
+
+# .env 로드
+# 절대 경로라서 수정 필요
+load_dotenv(dotenv_path="/home/rokey/Tutorial_2026/Tutorial/VoiceProcessing/.env")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 class STTNode(Node):
-    def __init__(self):
+    def __init__(self, api_key):
         super().__init__("stt_node")
         self.get_logger().info("STT Node initialized")
 
         # DB Client 초기화
         self.db_client = DBClient(self)
-
+        '''
         # Speech Recognizer 초기화
         # self.recognizer = sr.Recognizer()
         # self.microphone = sr.Microphone()
@@ -29,13 +41,74 @@ class STTNode(Node):
         #     self.get_logger().info("Ready for speech recognition")
 
         # # 타이머로 주기적으로 음성 인식 (5초마다)
-        # self.timer = self.create_timer(5.0, self.listen_and_process)
+        # 
+        '''
+
+        self.timer = self.create_timer(5.0, self.listen_and_process)
+
+        self.client = OpenAI(api_key=api_key)
+        self.duration = 5        # 녹음 시간 (초)
+        self.samplerate = 16000  # Whisper 권장 샘플레이트
 
         # 노드 시작 시 쿼리 실행
-        self.query_logs_by_keyword()
+        #self.query_logs_by_keyword()
 
     def listen_and_process(self):
         """마이크로 음성을 듣고 텍스트로 변환한 뒤 DB에 저장"""
+        try:
+            print("🎙️ 5초 동안 말해주세요...")
+
+            # 1️⃣ 마이크로 음성 녹음
+            audio = sd.rec(
+                int(self.duration * self.samplerate),
+                samplerate=self.samplerate,
+                channels=1,
+                dtype="int16",
+            )
+            sd.wait()
+            print("✅ 녹음 완료, STT 처리 중...")
+
+            # 2️⃣ 임시 wav 파일 생성
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
+                wav.write(temp_wav.name, self.samplerate, audio)
+
+                # 3️⃣ Whisper API로 STT
+                with open(temp_wav.name, "rb") as f:
+                    transcript = self.client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=f,
+                    )
+            line = transcript.text
+
+            # [4] 문장에서 명사만 추출
+            komoran = Komoran()
+            nouns = komoran.nouns(line)
+
+            stop_words = ['안녕', '이름', '잔']
+            # 필요 없는 말들 제외 리스트
+
+            filtered = [
+                n for n in nouns
+                if not any(word in n for word in stop_words)
+            ]
+            # 제외 리스트에 겹치는 말 거르기
+
+            print("원본:", nouns)
+            print("필터 후:", filtered)
+
+            # 이름, 메뉴 부분 변수에 지정
+            name = filtered[0]
+            menu = " ".join(filtered[1:])
+
+            print(name, menu)
+
+            # DB에 저장
+            self.save_to_database(name,menu)
+
+
+        except Exception as e:
+            self.get_logger().error(f"Error in listen_and_process: {e}")
+        '''
         try:
             self.get_logger().info("Listening...")
 
@@ -61,14 +134,16 @@ class STTNode(Node):
         except Exception as e:
             self.get_logger().error(f"Error in listen_and_process: {e}")
 
-    def save_to_database(self, text: str):
+        '''
+
+    def save_to_database(self, text: str, text2: str):
         """인식된 텍스트를 데이터베이스에 저장"""
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        #timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
         # INSERT 쿼리 작성
         query = f"""
-        INSERT INTO stt_logs (text, created_at)
-        VALUES ('{text.replace("'", "''")}', '{timestamp}')
+        INSERT INTO bartender_order_history (name, menu )
+        VALUES ('{text.replace("'", "''")}','{text2.replace("'", "''")}')
         """
 
         # DB에 쿼리 전송 및 응답 대기
@@ -177,7 +252,7 @@ class STTNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = STTNode()  # __init__에서 query_logs_by_keyword 자동 실행
+    node = STTNode(OPENAI_API_KEY)  # __init__에서 query_logs_by_keyword 자동 실행
 
     try:
         rclpy.spin(node)
