@@ -17,6 +17,9 @@ import os
 from dotenv import load_dotenv
 from konlpy.tag import Komoran
 
+from std_msgs.msg import String
+
+
 # .env 로드
 # 절대 경로라서 수정 필요
 load_dotenv(dotenv_path="/home/rokey/Tutorial_2026/Tutorial/VoiceProcessing/.env")
@@ -43,7 +46,24 @@ class STTNode(Node):
         # # 타이머로 주기적으로 음성 인식 (5초마다)
         # 
         '''
+        # 퍼블리시를 위한 변수 추가
+        self.last_name = None
 
+        # name 퍼블리셔 생성
+        self.name_publisher = self.create_publisher(
+            String,
+            "/customer_name",
+            10
+        )
+        # 퍼블리시 타이머
+        self.name_publish_timer = self.create_timer(
+            1.0,
+            self.publish_name_periodic
+        )
+
+
+
+        # 클라이언트 타이머
         self.timer = self.create_timer(5.0, self.listen_and_process)
 
         self.client = OpenAI(api_key=api_key)
@@ -52,6 +72,15 @@ class STTNode(Node):
 
         # 노드 시작 시 쿼리 실행
         #self.query_logs_by_keyword()
+
+    def publish_name_periodic(self):
+        if self.last_name is None:
+            return  # 아직 name이 없으면 아무 것도 안 함
+
+        msg = String()
+        msg.data = self.last_name
+        self.name_publisher.publish(msg)
+        self.get_logger().debug(f"Republished name: {self.last_name}")
 
     def listen_and_process(self):
         """마이크로 음성을 듣고 텍스트로 변환한 뒤 DB에 저장"""
@@ -105,6 +134,8 @@ class STTNode(Node):
             # DB에 저장
             self.save_to_database(name,menu)
 
+            # 이름 퍼블리시 위해 변수 저장
+            self.last_name = name
 
         except Exception as e:
             self.get_logger().error(f"Error in listen_and_process: {e}")
