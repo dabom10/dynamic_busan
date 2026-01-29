@@ -405,6 +405,8 @@ class PersonTrackingNode(Node):
         # 상태 변수
         # ---------------------------------------------------------------------
         self.pending_customer_name = None  # 아직 할당되지 않은 이름
+        self.pending_customer_name_time = None  # 이름 수신 시간
+        self.PENDING_NAME_TIMEOUT = 2.0  # 대기 이름 타임아웃 (초)
 
         # ---------------------------------------------------------------------
         # 웹캠 초기화
@@ -449,10 +451,13 @@ class PersonTrackingNode(Node):
         zone = self.tracker.assign_name_to_active(name)
         if zone > 0:
             self.get_logger().info(f'[NAME] "{name}" -> 구역 {zone} 할당 완료')
+            self.pending_customer_name = None
+            self.pending_customer_name_time = None
         else:
-            # 할당할 사람이 없으면 대기
+            # 할당할 사람이 없으면 대기 (타임스탬프 저장)
             self.pending_customer_name = name
-            self.get_logger().warn(f'[NAME] 할당할 사람 없음. 대기 중: "{name}"')
+            self.pending_customer_name_time = time.time()
+            self.get_logger().warn(f'[NAME] 할당할 사람 없음. 대기 중: "{name}" (2초 타임아웃)')
 
     def make_done_callback(self, msg):
         """제작 완료 신호 수신 콜백"""
@@ -488,12 +493,21 @@ class PersonTrackingNode(Node):
         fps = 1.0 / (current_time - self.fps_time + 1e-6)
         self.fps_time = current_time
 
+        # 대기 중인 이름 타임아웃 체크 (2초)
+        if self.pending_customer_name and self.pending_customer_name_time:
+            elapsed = current_time - self.pending_customer_name_time
+            if elapsed > self.PENDING_NAME_TIMEOUT:
+                self.get_logger().warn(f'[TIMEOUT] 대기 중이던 이름 "{self.pending_customer_name}" 삭제 ({elapsed:.1f}초 경과)')
+                self.pending_customer_name = None
+                self.pending_customer_name_time = None
+
         # 대기 중인 이름이 있고 새 사람이 등장하면 할당
         if self.pending_customer_name and events['new']:
             zone = self.tracker.assign_name_to_active(self.pending_customer_name)
             if zone > 0:
                 self.get_logger().info(f'[NAME] 대기 중이던 "{self.pending_customer_name}" -> 구역 {zone} 할당')
                 self.pending_customer_name = None
+                self.pending_customer_name_time = None
 
         # -----------------------------------------------------------------
         # Publish
