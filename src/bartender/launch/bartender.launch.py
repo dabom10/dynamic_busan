@@ -18,8 +18,8 @@ def generate_launch_description():
     # .env 파일 로드 (python-dotenv 사용)
     try:
         from dotenv import load_dotenv
-        # 절대 경로 사용 (ROS2 launch에서 __file__ 경로가 달라질 수 있음)
-        env_path = Path('/home/chans/dynamic_busan/.env')
+        # 사용자 홈 디렉토리 기준 경로 (~/dynamic_busan/.env)
+        env_path = Path.home() / 'dynamic_busan' / '.env'
         print(f"[DEBUG] Loading .env from: {env_path}")
         print(f"[DEBUG] .env file exists: {env_path.exists()}")
         result = load_dotenv(dotenv_path=env_path, override=True)

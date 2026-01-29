@@ -1,0 +1,5 @@
+# Bartender ROS2 Package Dependencies
+mariadb
+python-dotenv
+SpeechRecognition
+pyaudio
