@@ -32,6 +32,7 @@ setup(
         'db = bartender.db.mariadb_node:main',
         'query = bartender.db.query_node:main',
         'recovery = bartender.recovery.recovery:main',
+        'stt = bartender.stt.stt_node:main',
         ],
 }   ,
 )

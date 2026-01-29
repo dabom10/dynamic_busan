@@ -4,11 +4,12 @@ import sys
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from bartender.db.db_client import DBClient
 
 class ShakeController(Node):
     def __init__(self):
         super().__init__("shake_node")
-
+    
 
     def shake_start(self):
         self.get_logger().info("Shake Start")

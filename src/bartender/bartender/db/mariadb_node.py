@@ -13,11 +13,11 @@ class MariaDBNode(Node):
         super().__init__("mariadb_node")
 
         # MariaDB 연결 파라미터 선언 (launch 파일에서 제공)
-        self.declare_parameter('db_host')
-        self.declare_parameter('db_port')
-        self.declare_parameter('db_user')
-        self.declare_parameter('db_password')
-        self.declare_parameter('db_name')
+        self.declare_parameter('db_host', '')
+        self.declare_parameter('db_port', 3306)
+        self.declare_parameter('db_user', '')
+        self.declare_parameter('db_password', '')
+        self.declare_parameter('db_name', '')
 
         # 파라미터 가져오기
         self.db_host = self.get_parameter('db_host').value

@@ -77,7 +77,7 @@ def generate_launch_description():
     )
 
     # MariaDB 노드
-    mariadb_node = Node(
+    mariadb_node = Node(    
         package='bartender',
         executable='db',
         name='mariadb_node',
@@ -110,6 +110,15 @@ def generate_launch_description():
         emulate_tty=True,
     )
 
+    # STT 노드
+    stt_node = Node(
+        package='bartender',
+        executable='stt',
+        name='stt_node',
+        output='screen',
+        emulate_tty=True,
+    )
+
     return LaunchDescription([
         # Launch 인자들
         db_host_arg,
@@ -122,4 +131,5 @@ def generate_launch_description():
         mariadb_node,
         query_node,
         shake_node,
+        stt_node,
     ])
