@@ -1,31 +1,18 @@
 """
-tracking.py - ROS2 사람 추적 노드 (바텐더 연동 버전)
+tracking_debug_v3.py - 디버깅용 사람 추적 코드 (v3)
 
-웹캠(고정)에서 YOLOv8n + ByteTrack을 사용하여 사람을 추적하고,
-고객 이름 기반 추적 및 제작 완료 시 위치 정보를 publish합니다.
-
-======================================================================
-토픽 목록:
-----------------------------------------------------------------------
-[Subscribe]
-    /customer_name        (std_msgs/String)     - 고객 이름 (활성 구역에 할당)
-    /make_done            (std_msgs/Bool)       - 제작 완료 신호
-
-[Publish]
-    /person_appeared      (std_msgs/Bool)       - 새 사람 등장 시 True
-    /person_count         (std_msgs/Int32)      - 현재 추적 중인 사람 수
-    /zone_status          (std_msgs/Int32MultiArray) - 구역별 사람 수 [z1, z2, z3]
-    /active_zone          (std_msgs/Int32)      - 사람이 있는 구역 번호 (1,2,3 / 0=없음)
-    /zone_robot_pos       (std_msgs/Float32MultiArray) - 제작완료 시 해당 구역 로봇 좌표
-    /disappeared_customer_name (std_msgs/String) - 사라진 고객 이름
-======================================================================
+v2 대비 추가된 기능:
+- 한글 이름 바운딩박스 표시 (PIL 사용)
+- 이름 기반 고객 추적
+- /customer_name 구독 - 고객 이름 수신
+- /make_done 구독 - 제작 완료 신호 수신
+- /disappeared_customer_name 발행 - 사라진 고객 이름
+- /person_disappeared 제거
 
 실행 방법:
     ros2 run bartender tracking
 
-디버깅/테스트:
-    debug/tracking_debug_v1.py (ROS2 없이 단독 실행)
-    debug/tracking_debug_v2.py (구역 판단 버전)
+종료: 'q' 키
 """
 
 import time
@@ -51,6 +38,54 @@ ZONE_POSITIONS = {
     2: [318.21, -245.0, 56.0, 29.08, 180.0, 29.02],   # 구역2 (화면 중앙)
     3: [208.26, -245.0, 56.0, 29.08, 180.0, 29.02],   # 구역3 (화면 오른쪽)
 }
+
+
+# =============================================================================
+# 한글 폰트 설정
+# =============================================================================
+FONT_PATH = '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc'
+try:
+    KOREAN_FONT = ImageFont.truetype(FONT_PATH, 20)
+    KOREAN_FONT_SMALL = ImageFont.truetype(FONT_PATH, 16)
+except:
+    KOREAN_FONT = ImageFont.load_default()
+    KOREAN_FONT_SMALL = ImageFont.load_default()
+
+
+def put_korean_text(img, text, position, font=None, color=(255, 255, 255)):
+    """OpenCV 이미지에 한글 텍스트 출력
+
+    Args:
+        img: OpenCV 이미지 (BGR)
+        text: 출력할 텍스트
+        position: (x, y) 좌표
+        font: PIL 폰트 객체
+        color: BGR 색상 튜플
+
+    Returns:
+        img: 텍스트가 추가된 이미지
+    """
+    if font is None:
+        font = KOREAN_FONT
+
+    # OpenCV BGR -> PIL RGB
+    img_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(img_pil)
+
+    # BGR -> RGB 색상 변환
+    rgb_color = (color[2], color[1], color[0])
+    draw.text(position, text, font=font, fill=rgb_color)
+
+    # PIL RGB -> OpenCV BGR
+    return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+
+
+def get_text_size(text, font=None):
+    """텍스트 크기 계산"""
+    if font is None:
+        font = KOREAN_FONT
+    bbox = font.getbbox(text)
+    return bbox[2] - bbox[0], bbox[3] - bbox[1]
 
 
 # =============================================================================
@@ -238,54 +273,6 @@ class PersonTracker:
 
     def get_active_count(self):
         return len(self.tracked_persons)
-
-
-# =============================================================================
-# 한글 폰트 설정
-# =============================================================================
-FONT_PATH = '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc'
-try:
-    KOREAN_FONT = ImageFont.truetype(FONT_PATH, 20)
-    KOREAN_FONT_SMALL = ImageFont.truetype(FONT_PATH, 16)
-except:
-    KOREAN_FONT = ImageFont.load_default()
-    KOREAN_FONT_SMALL = ImageFont.load_default()
-
-
-def put_korean_text(img, text, position, font=None, color=(255, 255, 255)):
-    """OpenCV 이미지에 한글 텍스트 출력
-
-    Args:
-        img: OpenCV 이미지 (BGR)
-        text: 출력할 텍스트
-        position: (x, y) 좌표
-        font: PIL 폰트 객체
-        color: BGR 색상 튜플
-
-    Returns:
-        img: 텍스트가 추가된 이미지
-    """
-    if font is None:
-        font = KOREAN_FONT
-
-    # OpenCV BGR -> PIL RGB
-    img_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-    draw = ImageDraw.Draw(img_pil)
-
-    # BGR -> RGB 색상 변환
-    rgb_color = (color[2], color[1], color[0])
-    draw.text(position, text, font=font, fill=rgb_color)
-
-    # PIL RGB -> OpenCV BGR
-    return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
-
-
-def get_text_size(text, font=None):
-    """텍스트 크기 계산"""
-    if font is None:
-        font = KOREAN_FONT
-    bbox = font.getbbox(text)
-    return bbox[2] - bbox[0], bbox[3] - bbox[1]
 
 
 # =============================================================================
