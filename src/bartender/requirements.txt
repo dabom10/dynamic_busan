@@ -3,3 +3,4 @@ mariadb
 python-dotenv
 SpeechRecognition
 pyaudio
+konlpy
