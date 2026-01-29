@@ -25,7 +25,6 @@ setup(
     entry_points={
         'console_scripts': [
             'stt_test = voice.stt_test:main',
-            'recovery = bartender.recovery.recovery:main',
         ],
     },
 )
