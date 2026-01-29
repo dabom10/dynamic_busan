@@ -59,7 +59,7 @@ class MariaDBNode(Node):
         )
 
         # Timer: 주기적으로 연결 상태 확인 (1초마다)
-        self.timer = self.create_timer(1.0, self.check_connection_timer)
+        #self.timer = self.create_timer(60.0, self.check_connection_timer)
 
         self.get_logger().info(f"MariaDB Node initialized. Connecting to {self.db_host}:{self.db_port}/{self.db_name}")
 
