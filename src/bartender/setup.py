@@ -25,6 +25,7 @@ setup(
     entry_points={
     'console_scripts': [
         'shake = bartender.shake.shake_node:main',
+        'tracking = bartender.ob_tracking.tracking:main',
         ],
 }   ,
 )
