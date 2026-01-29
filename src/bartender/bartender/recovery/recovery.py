@@ -1,58 +1,89 @@
-import time
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import Bool
+from geometry_msgs.msg import PoseStamped
+import sys
 
-class CentralDatabase:
+class FailureRecoveryNode(Node):
     def __init__(self):
-        self.order_table = {
-            1: {"name": "김손님", "status": "완료", "keyword": "손님1"},
-            2: {"name": "이영희", "status": "주문자 부재", "keyword": "영희 라떼"},
-            3: {"name": "박철수", "status": "제조완료", "keyword": "철수 아아"}
+        super().__init__('failure_recovery_node')
+        
+        # ---------------------------------------------------------------------
+        # [장점 1: 확장성] 
+        # 새로운 데이터(폰번호, 메뉴 등)가 필요하면 키(Key)값만 추가하면 됩니다.
+        # 고정된 변수가 아닌 구조화된 데이터를 통해 유지보수가 쉬워집니다.
+        # ---------------------------------------------------------------------
+        self.order_info = {
+            "id": 2,
+            "name": "이영희",
+            "status": "미 수령",
+            "target_pose": {"x": 1.5, "y": 0.5, "w": 1.0}
         }
-
-    def fetch_status(self, order_id):
-        return self.order_table[order_id]["status"]
-
-    def update_status(self, order_id, new_status):
-        if order_id in self.order_table:
-            old = self.order_table[order_id]["status"]
-            self.order_table[order_id]["status"] = new_status
-            # 기계적인 메시지 대신 간결하게 변경
-            print(f"✅ [DB 업데이트] #{order_id}: {old} → {new_status}")
-
-class RobotMissionControl:
-    def __init__(self):
-        self.db = CentralDatabase()
-        self.shelf_location = "보관대_A"
-
-    def run_robot_logic(self):
-        print("🔍 주문 상태를 확인하는 중입니다...")
         
-        current_status = self.db.fetch_status(2)
+        self.is_terminated = False
+        self.goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
         
-        if current_status == "주문자 부재":
-            print(f"💡 2번 주문(이영희님)이 인식되지 않아 {self.shelf_location}로 옮깁니다.")
-            time.sleep(1.0)
-            
-            self.db.update_status(2, "미 수령")
-            
-            print("\n🏃 다음 주문(3번) 처리를 시작합니다.")
-            self._process_next_order(3)
-            
-            self._finalize_order_2(2)
+        # '사람 사라짐' 신호 구독
+        self.sub_disappeared = self.create_subscription(
+            Bool, '/person_disappeared', self.failure_trigger_callback, 10)
 
-    def _process_next_order(self, order_id):
-        print(f"☕ {order_id}번 음료 제조 및 전달을 마쳤습니다.")
-        self.db.update_status(order_id, "수령 완료")
+        self.get_logger().info(f"⚠️ [{self.order_info['name']}]님 주문 감시 중...")
 
-    def _finalize_order_2(self, order_id):
-        print(f"\n👀 {self.shelf_location}를 살피는 중... (수령 대기)")
-        time.sleep(1.0)
+    def failure_trigger_callback(self, msg):
+        """사람이 사라지는 찰나에 실행되는 콜백"""
+        if msg.data is True and not self.is_terminated:
+            
+            # -----------------------------------------------------------------
+            # [장점 2: 실시간 연동] 
+            # 외부 DB나 API에서 받은 최신 데이터를 self.order_info에 덮어씌우기만 하면
+            # 아래 로직은 코드 수정 없이 최신 정보를 바탕으로 즉시 동작합니다.
+            # -----------------------------------------------------------------
+            if self.order_info["status"] == "미 수령":
+                self.get_logger().error(f"🚨 인식 실패: {self.order_info['id']}번 {self.order_info['name']}님 부재.")
+                
+                # 딕셔너리 내부 값을 변경하여 현재 진행 상태를 실시간 기록
+                self.order_info["status"] = "보관대_A로 이동 중"
+                
+                # [장점 3: 유동성]
+                # 타겟이 바뀌어도 동일한 함수(move_to_shelf)에 딕셔너리 좌표값만 던져주면 끝!
+                self.move_to_shelf(self.order_info["target_pose"])
+                
+                self.get_logger().info(f"📦 {self.order_info['name']}님 물품 이동 명령 전송.")
+                self.terminate_node()
+            else:
+                self.get_logger().info(f"✅ {self.order_info['name']}님 정상 수령 확인.")
+                self.terminate_node()
+
+    def move_to_shelf(self, pose_data):
+        """딕셔너리 좌표 데이터를 기반으로 실제 로봇 이동 명령 발행"""
+        goal_msg = PoseStamped()
+        goal_msg.header.stamp = self.get_clock().now().to_msg()
+        goal_msg.header.frame_id = 'map'
         
-        print(f"✨ 주문자가 음료를 가져갔습니다.")
-        self.db.update_status(order_id, "수령 완료")
+        # 딕셔너리에서 꺼내온 좌표값 적용
+        goal_msg.pose.position.x = pose_data["x"]
+        goal_msg.pose.position.y = pose_data["y"]
+        goal_msg.pose.orientation.w = pose_data["w"]
+        
+        self.goal_pub.publish(goal_msg)
+        self.get_logger().info(f"🚀 [좌표 발행] x: {pose_data['x']}, y: {pose_data['y']}")
 
-def run_robot_logic(args=None):
-    controller = RobotMissionControl()
-    controller.run_robot_logic()
+    def terminate_node(self):
+        """임무 완료 후 스스로 노드 파괴 및 프로세스 종료"""
+        self.is_terminated = True
+        raise SystemExit 
 
-if __name__ == "__main__":
-    run_robot_logic()
+def main(args=None):
+    rclpy.init(args=args)
+    node = FailureRecoveryNode()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, SystemExit):
+        node.get_logger().info('Mission Complete. 노드를 종료합니다.')
+    finally:
+        if rclpy.ok():
+            node.destroy_node()
+            rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
