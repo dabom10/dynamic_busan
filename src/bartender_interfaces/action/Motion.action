@@ -1,0 +1,13 @@
+# Goal: 실행할 모션 정보
+int32 motion_id          # 모션 ID
+string motion_name       # 모션 이름 (예: "shake", "pour", "stir")
+int32 duration_ms        # 실행 시간 (밀리초)
+---
+# Result: 실행 결과
+bool success             # 성공 여부
+string message           # 결과 메시지
+int32 total_time_ms      # 총 소요 시간
+---
+# Feedback: 진행 상황
+int32 progress           # 진행률 (0-100)
+string current_step      # 현재 단계 설명

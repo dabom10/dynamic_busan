@@ -93,10 +93,19 @@ def generate_launch_description():
     )
 
     # Query 노드 (대화형 모드)
-    query_node = Node(
+    # query_node = Node(
+    #     package='bartender',
+    #     executable='query',
+    #     name='query_node',
+    #     output='screen',
+    #     emulate_tty=True,
+    # )
+
+    # Recipe 노드
+    recipe_node = Node(
         package='bartender',
-        executable='query',
-        name='query_node',
+        executable='recipe',
+        name='recipe_node',
         output='screen',
         emulate_tty=True,
     )
@@ -119,6 +128,15 @@ def generate_launch_description():
         emulate_tty=True,
     )
 
+    # Supervisor 노드 (전체 흐름 제어)
+    supervisor_node = Node(
+        package='bartender',
+        executable='supervisor',
+        name='supervisor_node',
+        output='screen',
+        emulate_tty=True,
+    )
+
     return LaunchDescription([
         # Launch 인자들
         db_host_arg,
@@ -129,7 +147,9 @@ def generate_launch_description():
 
         # 노드들
         mariadb_node,
-        query_node,
+        #query_node,
+        recipe_node,
         shake_node,
         stt_node,
+        supervisor_node,
     ])
