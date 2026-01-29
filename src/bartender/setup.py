@@ -1,4 +1,6 @@
 from setuptools import find_packages, setup
+import os
+from glob import glob
 
 package_name = 'bartender'
 
@@ -10,8 +12,9 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
-    install_requires=['setuptools'],
+    install_requires=['setuptools', 'mariadb'],
     zip_safe=True,
     maintainer='dorong',
     maintainer_email='ehdud2312@gmail.com',
@@ -26,6 +29,8 @@ setup(
     'console_scripts': [
         'shake = bartender.shake.shake_node:main',
         'tracking = bartender.ob_tracking.tracking:main',
+        'db = bartender.db.mariadb_node:main',
+        'query = bartender.db.query_node:main',
         ],
 }   ,
 )
