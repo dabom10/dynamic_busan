@@ -30,10 +30,8 @@ class PersonTracker:
 
     def update(self, frame):
         """프레임을 처리하고 추적 결과를 반환
-
         Args:
             frame: BGR 이미지 (numpy array)
-
         Returns:
             tracks: [(track_id, (x1,y1,x2,y2), confidence), ...]
             events: {'new': [ids], 'lost': [ids]}
@@ -205,7 +203,6 @@ def run_webcam_tracker(conf=0.35, show=True, src=0, lost_threshold=30):
         cap.release()
         cv2.destroyAllWindows()
         print("추적 종료")
-
 
 if __name__ == '__main__':
     run_webcam_tracker()
