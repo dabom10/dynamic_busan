@@ -132,7 +132,7 @@ class BartenderBot(Node):
             self.get_logger().info(f"Detected class={cls}, conf={conf:.2f}")
 
         # 1. 타겟 클래스만 필터링 (41:cup, 39:bottle, 45:bowl)
-        target_classes = [41, 39, 45]
+        target_classes = [41, 71, 39, 45]
         candidates = [b for b in results[0].boxes if int(b.cls[0]) in target_classes]
 
         if not candidates:
@@ -231,8 +231,9 @@ class BartenderBot(Node):
 
         self.get_logger().info("✅ 컵 인식 성공")
 
-        # 3. 고정 픽 좌표 (임시)
-        bx, by, bz = 473.85, 34.28, 373.67
+        # 3. 좌표 변환 (Camera -> Base)
+        bx, by, bz = self.transform_to_base(pos)
+        self.get_logger().info(f"🎯 변환된 타겟 좌표: {bx:.2f}, {by:.2f}, {bz:.2f}")
         rx, ry, rz = 19.83, 180.0, 19.28
 
         # 4. 접근
