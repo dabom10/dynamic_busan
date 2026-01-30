@@ -42,7 +42,7 @@ class SupervisorNode(Node):
         # ActionClient
         self._action_clients = {
             'recipe': ActionClient(self, Motion, 'recipe/motion', callback_group=self._cb_group),
-            'shake': ActionClient(self, Motion, 'shake/motion', callback_group=self._cb_group),
+            'shake': ActionClient(self, Motion, '/dsr01/shake/motion', callback_group=self._cb_group),
         }
 
         # 모션 시퀀스
@@ -126,6 +126,7 @@ class SupervisorNode(Node):
             self.save_to_database(name, menu)
             self.current_customer = name
             self.get_logger().info(f"=== Order: {name} ===")
+            #sd.wait()
             self.start_sequence()
 
         except Exception as e:

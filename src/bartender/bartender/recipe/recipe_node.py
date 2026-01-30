@@ -89,8 +89,13 @@ def main(args=None):
     rclpy.init(args=args)
     node = RecipeController()
 
+    # MultiThreadedExecutor 사용 (콜백 내 서비스 호출 데드락 방지)
+    from rclpy.executors import MultiThreadedExecutor
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
+
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
