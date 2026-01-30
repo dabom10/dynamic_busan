@@ -1,134 +1,163 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
-from geometry_msgs.msg import PoseStamped
+import sys
+import io
 import os
 
-# [설정] 로봇 기동 파라미터 및 홈 위치
-VELJ = 60.0  
-ACCJ = 60.0  
-J_READY = [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]
+# [1. 기초 설정] 한글 출력 및 경로 설정
+sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
+sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
 
-class FailureRecoveryNode(Node):
-    """
-    객체 인식 실패 정보와 제조 완료 신호를 결합하여
-    보관 공정을 수행하는 백그라운드 상시 대기 노드
-    """
+# [2. 두산 라이브러리 초기화 모듈 임포트]
+import DR_init
+
+# ========================================
+# 로봇 설정 파라미터
+# ========================================
+ROBOT_ID = "dsr01"
+ROBOT_MODEL = "m0609"
+
+VELJ, ACCJ = 60, 60     # 관절 속도/가속도
+VELX, ACCX = 150, 150   # 직선 속도/가속도
+J_READY = [0.0, 0.0, 90.0, 0.0, 90.0, 0.0] # 대기 위치
+
+class FailureRecoveryBot(Node):
     def __init__(self):
-        super().__init__('failure_recovery_node')
+        super().__init__("failure_recovery_bot", namespace=ROBOT_ID)
         
-        # 데이터 관리 변수
-        self.mission_status = "IDLE"
-        self.last_failed_customer = "미확인 고객" # 인식 실패 토픽으로 업데이트됨
+        # 미션 상태 관리
+        self.last_failed_customer = "미확인 고객"
         self.current_customer = None
+        self.is_mission_running = False  # 중복 실행 방지
         
-        # 이동 좌표 설정
-        self.storage_pose = {"x": 1.5, "y": 0.5, "w": 1.0}
-        self.home_joint = J_READY
-        
-        # [발행자] 로봇 목적지 전송
-        self.goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
-        
-        # [구독자 1] 객체 인식 실패 이름 수신 (비전 노드로부터)
+        # 보관대 좌표 (x, y, z, a, b, c) 
+        # ※ 실제 로봇 환경의 티칭 좌표로 반드시 수정 필요
+        self.storage_posx = [400.0, 200.0, 300.0, 0.0, 180.0, 0.0]
+
+        # 구독자 설정
         self.sub_disappeared = self.create_subscription(
-            String, 
-            '/disappeared_customer_name', 
-            self.disappeared_callback, 
-            10)
-        
-        # [구독자 2] 제조 완료 신호 수신 (제조 노드로부터)
-        self.sub_made = self.create_subscription(
-            String, 
-            '/manufacturing_done', 
-            self.start_recovery_mission, 
-            10)
+            String, '/disappeared_customer_name', self.disappeared_cb, 10)
+        self.sub_manufacturing = self.create_subscription(
+            String, '/manufacturing_done', self.start_mission_cb, 10)
 
-        # 시퀀스 제어용 타이머 (0.1초 간격)
-        self.timer = self.create_timer(0.1, self.state_machine_callback)
-        self.start_time = None
-        
         self.get_logger().info('='*50)
-        self.get_logger().info("🚀 복구 시스템 가동: 인식 실패 & 제조 완료 대기 중")
+        self.get_logger().info(f"🚀 M0609 복구 시스템 가동 (ID: {ROBOT_ID})")
+        self.get_logger().info(f"📡 토픽 구독:")
+        self.get_logger().info(f"   - /disappeared_customer_name")
+        self.get_logger().info(f"   - /manufacturing_done")
         self.get_logger().info('='*50)
 
-    def disappeared_callback(self, msg):
-        """인식 실패 신호가 오면 이름을 변수에 저장해 둡니다."""
+    def disappeared_cb(self, msg):
+        """인식 실패 고객 정보 수신"""
         self.last_failed_customer = msg.data.strip()
-        self.get_logger().warn(f"⚠️ 인식 실패 접수: [{self.last_failed_customer}] (제조 완료 시 즉시 이동)")
+        self.get_logger().warn(f"⚠️ 인식 실패 접수: [{self.last_failed_customer}]")
+        self.get_logger().info(f"현재 저장된 실패 고객: {self.last_failed_customer}")
 
-    def start_recovery_mission(self, msg):
-        """제조 완료 신호가 오면 저장된 이름을 사용하여 미션을 시작합니다."""
-        if self.mission_status != "IDLE":
+    def start_mission_cb(self, msg):
+        """제조 완료 신호 수신 시 미션 시작"""
+        if self.is_mission_running:
+            self.get_logger().warn("⚠️ 이미 미션 실행 중입니다. 무시합니다.")
             return
-
-        # 제조 완료 토픽에 이름이 있으면 사용하고, 없으면 미리 저장된 이름을 사용
-        msg_name = msg.data.strip()
-        self.current_customer = msg_name if msg_name else self.last_failed_customer
         
-        self.get_logger().error(f"🚨 [미션 시작] {self.current_customer}님의 음료를 보관대로 이동!")
+        # 제조 완료 메시지에서 고객 이름 추출
+        msg_data = msg.data.strip()
+        self.current_customer = msg_data if msg_data else self.last_failed_customer
         
-        # 공정 시작
-        self.mission_status = "MOVING_TO_STORAGE"
-        self.send_goal(self.storage_pose, "보관대")
-        self.start_time = self.get_clock().now()
-
-    def state_machine_callback(self):
-        """전체 공정 시퀀스 제어 루프"""
-        if self.mission_status == "IDLE" or self.start_time is None:
-            return
-
-        elapsed_time = (self.get_clock().now() - self.start_time).nanoseconds / 1e9
-
-        if self.mission_status == "MOVING_TO_STORAGE" and elapsed_time > 3.0:
-            self.get_logger().info(f"📥 [{self.current_customer}] 하역 단계 진입")
-            self.mission_status = "UNLOADING"
-            self.start_time = self.get_clock().now()
-
-        elif self.mission_status == "UNLOADING" and elapsed_time > 2.0:
-            self.get_logger().info("✅ 하역 완료. 홈 복귀 명령.")
-            self.send_joint_home()
-            self.mission_status = "MOVING_TO_HOME"
-            self.start_time = self.get_clock().now()
-
-        elif self.mission_status == "MOVING_TO_HOME" and elapsed_time > 3.0:
-            self.get_logger().info(f"🏁 [{self.current_customer}]님 보관 완료. 다시 대기 모드.")
-            self.get_logger().info("-" * 50)
-            
-            # 초기화 및 다음 미션 대기
-            self.mission_status = "IDLE"
+        self.get_logger().error('='*50)
+        self.get_logger().error(f"🚨 [미션 시작] {self.current_customer}님의 음료 이동")
+        self.get_logger().error(f"📍 목표 좌표: {self.storage_posx}")
+        self.get_logger().error('='*50)
+        
+        # 로봇 동작 시퀀스 실행
+        self.is_mission_running = True
+        try:
+            print('유성호바보')
+            self.recovery_sequence()
+            self.get_logger().info(f"✅ [{self.current_customer}] 미션 완료")
+        except Exception as e:
+            self.get_logger().error(f"❌ 동작 중 에러: {e}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+        finally:
+            self.is_mission_running = False
             self.current_customer = None
-            self.start_time = None
 
-    def send_goal(self, pose_data, label):
-        """이동 좌표 발행"""
-        msg = PoseStamped()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = 'map'
-        msg.pose.position.x = pose_data["x"]
-        msg.pose.position.y = pose_data["y"]
-        msg.pose.orientation.w = pose_data["w"]
-        self.goal_pub.publish(msg)
-        self.get_logger().info(f"🚚 {label} 이동 (속도:{VELJ})")
+    def recovery_sequence(self):
+        """실제 로봇 동작 시퀀스 (DSR_ROBOT2 함수 사용)"""
+        try:
+            self.get_logger().info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            self.get_logger().info("1️⃣ 홈 위치로 이동")
+            movej(J_READY, vel=VELJ, acc=ACCJ)
+            wait(0.5)
+            
+            self.get_logger().info("2️⃣ 음료 파지 (Grip)")
+            set_digital_output(1, 1)  # 그리퍼 ON (예시 핀 1번)
+            wait(1.0)
 
-    def send_joint_home(self):
-        """홈 조인트 발행"""
-        joints = self.home_joint
-        msg = PoseStamped()
-        msg.pose.position.x = float(joints[0])
-        msg.pose.position.y = float(joints[1])
-        msg.pose.position.z = float(joints[2])
-        self.goal_pub.publish(msg)
+            self.get_logger().info("3️⃣ 보관대 상공으로 이동")
+            target_up = list(self.storage_posx)  # 복사본 생성
+            target_up[2] += 100.0  # Z축 위로 100mm
+            self.get_logger().info(f"   상공 좌표: {target_up}")
+            movel(target_up, vel=VELX, acc=ACCX)
+            wait(0.5)
+
+            self.get_logger().info("4️⃣ 보관대에 내려놓기")
+            self.get_logger().info(f"   목표 좌표: {self.storage_posx}")
+            movel(self.storage_posx, vel=VELX//2, acc=ACCX//2)
+            wait(0.5)
+            
+            self.get_logger().info("5️⃣ 그리퍼 해제")
+            set_digital_output(1, 0)  # 그리퍼 OFF
+            wait(1.0)
+
+            self.get_logger().info("6️⃣ 안전 거리 확보 후 복귀")
+            movel([0, 0, 100, 0, 0, 0], vel=VELX, acc=ACCX, mod=DR_MV_MOD_REL)
+            wait(0.5)
+            movej(J_READY, vel=VELJ, acc=ACCJ)
+            
+            self.get_logger().info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            self.get_logger().info("🏁 시퀀스 완료")
+            
+        except Exception as e:
+            self.get_logger().error(f"❌ 시퀀스 실행 중 오류: {e}")
+            raise
 
 def main(args=None):
     rclpy.init(args=args)
-    node = FailureRecoveryNode()
+    
+    # [중요] 1. 두산 라이브러리 기초 정보 등록
+    DR_init.__dsr__id = ROBOT_ID
+    DR_init.__dsr__model = ROBOT_MODEL
+
+    # [중요] 2. 노드 생성
+    node = FailureRecoveryBot()
+    
+    # [중요] 3. 생성된 노드 객체를 라이브러리에 전달
+    DR_init.__dsr__node = node 
+
+    # [중요] 4. 노드가 등록된 '후'에 동작 함수들을 임포트하여 전역으로 설정
+    global movej, movel, posx, wait, set_digital_output, DR_MV_MOD_REL
+    from DSR_ROBOT2 import movej, movel, posx, wait, set_digital_output, DR_MV_MOD_REL
+
     try:
+        node.get_logger().info("🔌 로봇 서비스 연결 확인 중...")
+        node.get_logger().info("✅ 준비 완료. 토픽 대기 중...")
+        
+        # rclpy.spin은 콜백을 처리하기 위해 계속 실행됨
         rclpy.spin(node)
     except KeyboardInterrupt:
-        pass
+        node.get_logger().info("🛑 사용자에 의해 종료됨")
+    except Exception as e:
+        node.get_logger().error(f"❌ 예상치 못한 오류: {e}")
+        import traceback
+        node.get_logger().error(traceback.format_exc())
     finally:
         node.destroy_node()
         rclpy.shutdown()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
