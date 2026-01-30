@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import time
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
@@ -20,10 +21,11 @@ import DR_init
 # ========================================
 ROBOT_ID = "dsr01"
 ROBOT_MODEL = "m0609"
-
-VELJ, ACCJ = 60, 60     # 관절 속도/가속도
+VELJ = 60
+ACCJ = 60
+# VELJ, ACCJ = 60, 60     # 관절 속도/가속도
 VELX, ACCX = 150, 150   # 직선 속도/가속도
-J_READY = [0.0, 0.0, 90.0, 0.0, 90.0, 0.0] # 대기 위치
+J_READY = [0, 0, 0, 0, 0, 0] # 대기 위치
 
 class FailureRecoveryBot(Node):
     def __init__(self):
@@ -75,7 +77,8 @@ class FailureRecoveryBot(Node):
         # 로봇 동작 시퀀스 실행
         self.is_mission_running = True
         try:
-            print('유성호바보')
+            self.get_logger().info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            # movej([0, 0, 90, 0, 100, 0], vel=VELJ, acc=ACCJ)
             self.recovery_sequence()
             self.get_logger().info(f"✅ [{self.current_customer}] 미션 완료")
         except Exception as e:
@@ -87,12 +90,16 @@ class FailureRecoveryBot(Node):
             self.current_customer = None
 
     def recovery_sequence(self):
+        # from DSR_ROBOT2 import movej, movel, posx, wait, set_digital_output, DR_MV_MOD_REL
         """실제 로봇 동작 시퀀스 (DSR_ROBOT2 함수 사용)"""
         try:
             self.get_logger().info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             self.get_logger().info("1️⃣ 홈 위치로 이동")
+            self.get_logger().info("1홈 위치로 이동")
             movej(J_READY, vel=VELJ, acc=ACCJ)
+            self.get_logger().info("홈 위치로 이동")
             wait(0.5)
+            self.get_logger().info("위치로 이동")
             
             self.get_logger().info("2️⃣ 음료 파지 (Grip)")
             set_digital_output(1, 1)  # 그리퍼 ON (예시 핀 1번)
@@ -146,9 +153,13 @@ def main(args=None):
     try:
         node.get_logger().info("🔌 로봇 서비스 연결 확인 중...")
         node.get_logger().info("✅ 준비 완료. 토픽 대기 중...")
-        
+        # movej([0, 0, 90, 0, 100, 0], vel=VELJ, acc=ACCJ)
+        # movej([0, 0, 90, 0, 90, 0], vel=VELJ, acc=ACCJ)
         # rclpy.spin은 콜백을 처리하기 위해 계속 실행됨
+        
+        # movej(J_READY, vel=VELJ, acc=ACCJ)
         rclpy.spin(node)
+        # node.run()
     except KeyboardInterrupt:
         node.get_logger().info("🛑 사용자에 의해 종료됨")
     except Exception as e:
