@@ -2,11 +2,13 @@
 """
 Supervisor Node - 여러 노드의 순차 실행 제어
 각 노드별 ActionClient를 통해 순차적으로 모션 실행
+stt_node의 /customer_name 토픽 수신 시 시퀀스 시작
 """
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
+from std_msgs.msg import String
 
 from bartender_interfaces.action import Motion
 
@@ -31,14 +33,41 @@ class SupervisorNode(Node):
             {'client': 'shake', 'name': 'shake_it'},
         ]
         self.current_index = 0
+        self.is_running = False  # 중복 실행 방지
+        self.current_customer = None  # 현재 고객 이름
 
-        # 초기화 완료 후 시작 (타이머로 지연 호출)
-        self.start_timer = self.create_timer(
-            2.0, self.start_sequence, callback_group=self._cb_group)
+        # /customer_name 토픽 구독 (stt_node에서 발행)
+        self.create_subscription(
+            String,
+            '/customer_name',
+            self.on_customer_name,
+            10,
+            callback_group=self._cb_group
+        )
+
+        self.get_logger().info("Waiting for /customer_name topic...")
+
+    def on_customer_name(self, msg):
+        """고객 이름 수신 시 시퀀스 시작"""
+        customer_name = msg.data.strip()
+
+        # 중복 실행 방지
+        if self.is_running:
+            self.get_logger().warn(f"Already running! Ignoring: {customer_name}")
+            return
+
+        # 같은 고객 이름이면 무시 (stt_node가 주기적으로 발행하므로)
+        if customer_name == self.current_customer:
+            return
+
+        self.current_customer = customer_name
+        self.get_logger().info(f"=== Order received: {customer_name} ===")
+        self.start_sequence()
 
     def start_sequence(self):
-        """시퀀스 시작 (1회만 실행)"""
-        self.start_timer.cancel()
+        """시퀀스 시작"""
+        self.is_running = True
+        self.current_index = 0
 
         self.get_logger().info("Waiting for Action Servers...")
 
@@ -46,6 +75,7 @@ class SupervisorNode(Node):
         for name, client in self._action_clients.items():
             if not client.wait_for_server(timeout_sec=5.0):
                 self.get_logger().error(f"  - {name}/motion server not available!")
+                self.reset_state()
                 return
             self.get_logger().info(f"  - {name}/motion connected")
 
@@ -55,7 +85,8 @@ class SupervisorNode(Node):
     def execute_next(self):
         """다음 모션 실행"""
         if self.current_index >= len(self.motion_sequence):
-            self.get_logger().info("=== All motions completed! ===")
+            self.get_logger().info(f"=== All motions completed for {self.current_customer}! ===")
+            self.reset_state()
             return
 
         motion = self.motion_sequence[self.current_index]
@@ -102,6 +133,12 @@ class SupervisorNode(Node):
 
         self.current_index += 1
         self.execute_next()
+
+    def reset_state(self):
+        """시퀀스 완료 후 상태 초기화"""
+        self.is_running = False
+        self.current_customer = None
+        self.current_index = 0
 
 
 def main(args=None):

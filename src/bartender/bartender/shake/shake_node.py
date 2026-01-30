@@ -35,27 +35,27 @@ class ShakeController(Node):
         feedback_msg = Motion.Feedback()
         start_time = time.time()
 
-        # 모션 리스트 정의 (step_name, position)
+        # 모션 리스트 정의 (step_name)
         # TODO: 실제 movel, movej 좌표로 교체
         motions = [
-            ("Move to ready position", [0, 0, 0, 0, 0, 0]),
-            ("Move to shake position", [100, 100, 100, 0, 0, 0]),
-            ("Shaking motion 1", [100, 100, 150, 0, 0, 0]),
-            ("Shaking motion 2", [100, 100, 50, 0, 0, 0]),
-            ("Return to home", [0, 0, 0, 0, 0, 0]),
+            ("Move to ready position"),
+            ("Move to shake position"),
+            ("Shaking motion 1"),
+            ("Shaking motion 2"),
+            ("Return to home"),
         ]
 
         total_motions = len(motions)
 
-        for i, (step_name, position) in enumerate(motions):
+        for i, (step_name) in enumerate(motions):
             # 진행률 계산 (각 모션 완료 시)
             progress = int((i + 1) / total_motions * 100)
 
             # Feedback 발행 (모션 시작)
-            feedback_msg.progress = progress - (100 // total_motions)
-            feedback_msg.current_step = f"[{i + 1}/{total_motions}] {step_name}"
-            goal_handle.publish_feedback(feedback_msg)
-            self.get_logger().info(f"Starting: {feedback_msg.current_step}")
+            #feedback_msg.progress = progress - (100 // total_motions)
+            #feedback_msg.current_step = f"[{i + 1}/{total_motions}] {step_name}"
+            #goal_handle.publish_feedback(feedback_msg)
+            #self.get_logger().info(f"Starting: {feedback_msg.current_step}")
 
             # 실제 모션 실행
             # TODO: 실제 로봇 제어 코드로 교체
