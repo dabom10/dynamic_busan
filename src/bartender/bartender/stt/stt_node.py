@@ -8,7 +8,10 @@ from rclpy.node import Node
 #import speech_recognition as sr
 from datetime import datetime
 from bartender.db.db_client import DBClient
+from std_msgs.msg import String
+from pathlib import Path
 
+# 음성 인식
 from openai import OpenAI
 import sounddevice as sd
 import scipy.io.wavfile as wav
@@ -17,12 +20,16 @@ import os
 from dotenv import load_dotenv
 from konlpy.tag import Komoran
 
-from std_msgs.msg import String
-
+# wakeup 
+import time
+from .wakeup import WakeupWord
+from . import MicController
 
 # .env 로드
-# 절대 경로라서 수정 필요
-load_dotenv(dotenv_path="/home/rokey/Tutorial_2026/Tutorial/VoiceProcessing/.env")
+
+env_path = Path.home() / 'dynamic_busan' / '.env'
+load_dotenv(dotenv_path=env_path)
+# load_dotenv(dotenv_path="/home/rokey/Tutorial_2026/Tutorial/VoiceProcessing/.env")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 class STTNode(Node):
@@ -32,20 +39,7 @@ class STTNode(Node):
 
         # DB Client 초기화
         self.db_client = DBClient(self)
-        '''
-        # Speech Recognizer 초기화
-        # self.recognizer = sr.Recognizer()
-        # self.microphone = sr.Microphone()
 
-        # # 마이크 노이즈 조정
-        # with self.microphone as source:
-        #     self.get_logger().info("Adjusting for ambient noise... Please wait")
-        #     self.recognizer.adjust_for_ambient_noise(source, duration=2)
-        #     self.get_logger().info("Ready for speech recognition")
-
-        # # 타이머로 주기적으로 음성 인식 (5초마다)
-        # 
-        '''
         # 퍼블리시를 위한 변수 추가
         self.last_name = None
 
@@ -61,10 +55,10 @@ class STTNode(Node):
             self.publish_name_periodic
         )
 
-
-
         # 클라이언트 타이머
-        self.timer = self.create_timer(5.0, self.listen_and_process)
+        #self.timer = self.create_timer(5.0, self.listen_and_process)
+        self.wakeup_timer = self.create_timer(0.1, self.check_wakeup)
+
 
         self.client = OpenAI(api_key=api_key)
         self.duration = 5        # 녹음 시간 (초)
@@ -72,6 +66,45 @@ class STTNode(Node):
 
         # 노드 시작 시 쿼리 실행
         #self.query_logs_by_keyword()
+
+        # ---------- wakeup word 초기화 추가 부분 ---------------
+        self.mic = MicController.MicController()
+        self.mic.open_stream()
+
+        self.wakeup = WakeupWord(self.mic.config.buffer_size)
+        self.wakeup.set_stream(self.mic.stream)
+
+        self.waiting_for_wakeup = True
+        self.wakeup_timer = self.create_timer(0.1, self.check_wakeup)
+
+        # wakeup 트리거 부분 업데이트 기다리기 위한 변수
+        self.last_wakeup_time = None
+        self.wakeup_cooldown = 10.0 
+
+    # 트리거 콜백
+    def check_wakeup(self):
+        self.get_logger().info("Wakeup 대기중...")
+        if not self.waiting_for_wakeup:
+            return
+        
+        now = time.time()
+
+        # True 트리거 이후 일정 시간 지난 다음에 다시 트리거 체크
+        # 트리거 True값이 남아있는 시간 고려를 위함
+        if self.last_wakeup_time is not None:
+            if (now - self.last_wakeup_time) < self.wakeup_cooldown:
+                print("되돌아가기 (cooldown)")
+                return
+        
+        if self.wakeup.is_wakeup():
+            self.get_logger().info("Wakeup detected")
+            # 트리거 True된 시점 저장
+            self.last_wakeup_time = now
+
+            self.waiting_for_wakeup = False
+            self.listen_and_process()
+            self.waiting_for_wakeup = True
+        # ---------------------------------------------------------
 
     def publish_name_periodic(self):
         if self.last_name is None:
