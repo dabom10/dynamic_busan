@@ -32,7 +32,7 @@ setup(
         'tracking = bartender.ob_tracking.tracking:main',
         'db = bartender.db.mariadb_node:main',
         'query = bartender.db.query_node:main',
-        'recovery = bartender.recovery.recovery:main',
+        'recovery = bartender.recovery.recovery_node:main',
         'stt = bartender.stt.stt_node:main',
         'supervisor = bartender.supervisor.supervisor_node:main',
         ],
