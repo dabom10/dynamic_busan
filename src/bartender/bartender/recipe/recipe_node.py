@@ -27,36 +27,54 @@ class RecipeController(Node):
         self.get_logger().info("Recipe Action Server ready (recipe/motion)")
 
     def execute_callback(self, goal_handle: ServerGoalHandle):
-        """Action 실행 콜백"""
-        self.get_logger().info(f"Received goal: motion_id={goal_handle.request.motion_id}, "
-                               f"name={goal_handle.request.motion_name}, "
-                               f"duration={goal_handle.request.duration_ms}ms")
-
+        """Action 실행 콜백 (Goal 수신 시 호출됨)"""
         motion_name = goal_handle.request.motion_name
-        duration_ms = goal_handle.request.duration_ms
+        self.get_logger().info(f"Received goal: name={motion_name}")
 
-        # Feedback 메시지
+        # Feedback 메시지 생성
         feedback_msg = Motion.Feedback()
-
-        # 모션 실행 (시뮬레이션)
         start_time = time.time()
-        total_steps = 10
 
-        for i in range(total_steps):
-            progress = int((i + 1) / total_steps * 100)
+        # 모션 리스트 정의 (step_name, position)
+        # TODO: 실제 movel, movej 좌표로 교체
+        motions = [
+            ("Move to ingredient position", [0, 0, 0, 0, 0, 0]),
+            ("Pour ingredient 1", [50, 50, 50, 0, 0, 0]),
+            ("Move to next ingredient", [100, 0, 0, 0, 0, 0]),
+            ("Pour ingredient 2", [100, 50, 50, 0, 0, 0]),
+            ("Return to home", [0, 0, 0, 0, 0, 0]),
+        ]
 
-            feedback_msg.progress = progress
-            feedback_msg.current_step = f"Recipe {motion_name} step {i + 1}/{total_steps}"
+        total_motions = len(motions)
+
+        for i, (step_name, position) in enumerate(motions):
+            # 진행률 계산 (각 모션 완료 시)
+            progress = int((i + 1) / total_motions * 100)
+
+            # Feedback 발행 (모션 시작)
+            feedback_msg.progress = progress - (100 // total_motions)
+            feedback_msg.current_step = f"[{i + 1}/{total_motions}] {step_name}"
             goal_handle.publish_feedback(feedback_msg)
+            self.get_logger().info(f"Starting: {feedback_msg.current_step}")
 
-            self.get_logger().info(f"Progress: {progress}% - {feedback_msg.current_step}")
+            # 실제 모션 실행
+            # TODO: 실제 로봇 제어 코드로 교체
+            # self.movel(position) 또는 self.movej(position)
+            time.sleep(0.5)  # 시뮬레이션
 
-            time.sleep(duration_ms / 1000 / total_steps)
+            # Feedback 발행 (모션 완료)
+            feedback_msg.progress = progress
+            feedback_msg.current_step = f"[{i + 1}/{total_motions}] {step_name} - Done"
+            goal_handle.publish_feedback(feedback_msg)
+            self.get_logger().info(f"Completed: {step_name} ({progress}%)")
 
+        # 완료 시간 계산
         elapsed_ms = int((time.time() - start_time) * 1000)
 
+        # Goal 성공 처리
         goal_handle.succeed()
 
+        # Result 반환
         result = Motion.Result()
         result.success = True
         result.message = f"Recipe '{motion_name}' completed successfully"

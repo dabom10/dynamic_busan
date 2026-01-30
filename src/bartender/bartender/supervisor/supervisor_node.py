@@ -6,6 +6,7 @@ Supervisor Node - 여러 노드의 순차 실행 제어
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
+from rclpy.callback_groups import ReentrantCallbackGroup
 
 from bartender_interfaces.action import Motion
 
@@ -15,23 +16,37 @@ class SupervisorNode(Node):
         super().__init__("supervisor_node")
         self.get_logger().info("Supervisor Node initialized")
 
+        # Callback Group (비동기 처리용)
+        self._cb_group = ReentrantCallbackGroup()
+
         # 각 노드별 ActionClient
-        self._clients = {
-            'recipe': ActionClient(self, Motion, 'recipe/motion'),
-            'shake': ActionClient(self, Motion, 'shake/motion'),
+        self._action_clients = {
+            'recipe': ActionClient(self, Motion, 'recipe/motion', callback_group=self._cb_group),
+            'shake': ActionClient(self, Motion, 'shake/motion', callback_group=self._cb_group),
         }
 
         # 실행할 모션 시퀀스 (client: 어떤 노드로 보낼지)
         self.motion_sequence = [
-            {'client': 'recipe', 'id': 1, 'name': 'make_drink', 'duration_ms': 2000},
-            {'client': 'shake', 'id': 2, 'name': 'shake_it', 'duration_ms': 3000},
+            {'client': 'recipe', 'name': 'make_drink'},
+            {'client': 'shake', 'name': 'shake_it'},
         ]
         self.current_index = 0
 
-        # 모든 서버 연결 대기
+        # 초기화 완료 후 시작 (타이머로 지연 호출)
+        self.start_timer = self.create_timer(
+            2.0, self.start_sequence, callback_group=self._cb_group)
+
+    def start_sequence(self):
+        """시퀀스 시작 (1회만 실행)"""
+        self.start_timer.cancel()
+
         self.get_logger().info("Waiting for Action Servers...")
-        for name, client in self._clients.items():
-            client.wait_for_server()
+
+        # 서버 연결 확인 (타임아웃 사용)
+        for name, client in self._action_clients.items():
+            if not client.wait_for_server(timeout_sec=5.0):
+                self.get_logger().error(f"  - {name}/motion server not available!")
+                return
             self.get_logger().info(f"  - {name}/motion connected")
 
         self.get_logger().info("All servers connected! Starting sequence...")
@@ -45,7 +60,7 @@ class SupervisorNode(Node):
 
         motion = self.motion_sequence[self.current_index]
         client_name = motion['client']
-        client = self._clients[client_name]
+        client = self._action_clients[client_name]
 
         self.get_logger().info(
             f"[{self.current_index + 1}/{len(self.motion_sequence)}] "
@@ -54,13 +69,14 @@ class SupervisorNode(Node):
 
         # Goal 생성
         goal = Motion.Goal()
-        goal.motion_id = motion['id']
         goal.motion_name = motion['name']
-        goal.duration_ms = motion['duration_ms']
 
         # Goal 전송
-        future = client.send_goal_async(goal, feedback_callback=self.on_feedback)
-        future.add_done_callback(self.on_goal_accepted)
+        send_goal_future = client.send_goal_async(
+            goal,
+            feedback_callback=self.on_feedback
+        )
+        send_goal_future.add_done_callback(self.on_goal_accepted)
 
     def on_goal_accepted(self, future):
         """Goal 수락됨"""
@@ -68,6 +84,8 @@ class SupervisorNode(Node):
         if not goal_handle.accepted:
             self.get_logger().error("Goal rejected!")
             return
+
+        self.get_logger().info("Goal accepted")
 
         result_future = goal_handle.get_result_async()
         result_future.add_done_callback(self.on_result)
@@ -89,9 +107,19 @@ class SupervisorNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = SupervisorNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+
+    # MultiThreadedExecutor 사용
+    from rclpy.executors import MultiThreadedExecutor
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
+
+    try:
+        executor.spin()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":

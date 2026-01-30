@@ -28,35 +28,50 @@ class ShakeController(Node):
 
     def execute_callback(self, goal_handle: ServerGoalHandle):
         """Action 실행 콜백 (Goal 수신 시 호출됨)"""
-        self.get_logger().info(f"Received goal: motion_id={goal_handle.request.motion_id}, "
-                               f"name={goal_handle.request.motion_name}, "
-                               f"duration={goal_handle.request.duration_ms}ms")
-
-        # Goal 정보 추출
-        motion_id = goal_handle.request.motion_id
         motion_name = goal_handle.request.motion_name
-        duration_ms = goal_handle.request.duration_ms
+        self.get_logger().info(f"Received goal: name={motion_name}")
 
         # Feedback 메시지 생성
         feedback_msg = Motion.Feedback()
-
-        # 모션 실행 (시뮬레이션)
         start_time = time.time()
-        total_steps = 10
 
-        for i in range(total_steps):
-            # 진행률 계산
-            progress = int((i + 1) / total_steps * 100)
+        # 모션 리스트 정의 (step_name, position)
+        # TODO: 실제 movel, movej 좌표로 교체
+        motions = [
+            ("Move to ready position", [0, 0, 0, 0, 0, 0]),
+            ("Move to shake position", [100, 100, 100, 0, 0, 0]),
+            ("Shaking motion 1", [100, 100, 150, 0, 0, 0]),
+            ("Shaking motion 2", [100, 100, 50, 0, 0, 0]),
+            ("Return to home", [0, 0, 0, 0, 0, 0]),
+        ]
 
-            # Feedback 발행
-            feedback_msg.progress = progress
-            feedback_msg.current_step = f"Executing {motion_name} step {i + 1}/{total_steps}"
+        total_motions = len(motions)
+
+        for i, (step_name, position) in enumerate(motions):
+            # 진행률 계산 (각 모션 완료 시)
+            progress = int((i + 1) / total_motions * 100)
+
+            # Feedback 발행 (모션 시작)
+            feedback_msg.progress = progress - (100 // total_motions)
+            feedback_msg.current_step = f"[{i + 1}/{total_motions}] {step_name}"
             goal_handle.publish_feedback(feedback_msg)
+            self.get_logger().info(f"Starting: {feedback_msg.current_step}")
 
-            self.get_logger().info(f"Progress: {progress}% - {feedback_msg.current_step}")
+            # 실제 모션 실행
+            # TODO: 실제 로봇 제어 코드로 교체
+            # self.movel(position) 또는 self.movej(position)
+            if step_name == 'Move to ready position':
+                pass
+            elif step_name == 'Shaking motion 1':
+                pass
 
-            # 실제 모션 시간 시뮬레이션
-            time.sleep(duration_ms / 1000 / total_steps)
+            time.sleep(0.5)  # 시뮬레이션
+
+            # Feedback 발행 (모션 완료)
+            feedback_msg.progress = progress
+            feedback_msg.current_step = f"[{i + 1}/{total_motions}] {step_name} - Done"
+            goal_handle.publish_feedback(feedback_msg)
+            self.get_logger().info(f"Completed: {step_name} ({progress}%)")
 
         # 완료 시간 계산
         elapsed_ms = int((time.time() - start_time) * 1000)
@@ -73,7 +88,6 @@ class ShakeController(Node):
         self.get_logger().info(f"Motion completed in {elapsed_ms}ms")
 
         return result
-
 
 def main(args=None):
     rclpy.init(args=args)
