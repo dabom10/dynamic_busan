@@ -119,16 +119,7 @@ def generate_launch_description():
         emulate_tty=True,
     )
 
-    # STT 노드
-    stt_node = Node(
-        package='bartender',
-        executable='stt',
-        name='stt_node',
-        output='screen',
-        emulate_tty=True,
-    )
-
-    # Supervisor 노드 (전체 흐름 제어)
+    # Supervisor 노드 (STT + 전체 흐름 제어 통합)
     supervisor_node = Node(
         package='bartender',
         executable='supervisor',
@@ -147,9 +138,7 @@ def generate_launch_description():
 
         # 노드들
         mariadb_node,
-        #query_node,
         recipe_node,
         shake_node,
-        stt_node,
         supervisor_node,
     ])

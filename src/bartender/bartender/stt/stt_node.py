@@ -5,10 +5,8 @@ Captures microphone input, converts to text, and saves to database
 """
 import rclpy
 from rclpy.node import Node
-#import speech_recognition as sr
-from datetime import datetime
 from bartender.db.db_client import DBClient
-from std_msgs.msg import String
+from std_msgs.msg import String, Bool
 from pathlib import Path
 
 # 음성 인식
@@ -20,16 +18,13 @@ import os
 from dotenv import load_dotenv
 from konlpy.tag import Komoran
 
-# wakeup 
-import time
+# wakeup
 from .wakeup import WakeupWord
 from . import MicController
 
 # .env 로드
-
 env_path = Path.home() / 'dynamic_busan' / '.env'
 load_dotenv(dotenv_path=env_path)
-# load_dotenv(dotenv_path="/home/rokey/Tutorial_2026/Tutorial/VoiceProcessing/.env")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 class STTNode(Node):
@@ -49,17 +44,8 @@ class STTNode(Node):
             "/customer_name",
             10
         )
-        # 퍼블리시 타이머
-        self.name_publish_timer = self.create_timer(
-            1.0,
-            self.publish_name_periodic
-        )
 
-        # 클라이언트 타이머
-        #self.timer = self.create_timer(5.0, self.listen_and_process)
-        self.wakeup_timer = self.create_timer(0.1, self.check_wakeup)
-
-
+        # OpenAI 클라이언트
         self.client = OpenAI(api_key=api_key)
         self.duration = 5        # 녹음 시간 (초)
         self.samplerate = 16000  # Whisper 권장 샘플레이트
@@ -75,45 +61,39 @@ class STTNode(Node):
         self.wakeup.set_stream(self.mic.stream)
 
         self.waiting_for_wakeup = True
-        self.wakeup_timer = self.create_timer(0.1, self.check_wakeup)
+        self.check_in_progress = False  # 중복 실행 방지
+        self.wakeup_timer = self.create_timer(0.5, self.check_wakeup)
 
-        # wakeup 트리거 부분 업데이트 기다리기 위한 변수
-        self.last_wakeup_time = None
-        self.wakeup_cooldown = 10.0 
+        # supervisor 상태 구독
+        self.supervisor_running = False
+        self.create_subscription(
+            Bool,
+            '/supervisor/state',
+            self.on_supervisor_state,
+            10
+        )
 
+    def on_supervisor_state(self, msg):
+        """supervisor 상태 업데이트"""
+        self.supervisor_running = msg.data
+        print(self.supervisor_running)
     # 트리거 콜백
     def check_wakeup(self):
-        self.get_logger().info("Wakeup 대기중...")
-        if not self.waiting_for_wakeup:
-            return
-        
-        now = time.time()
-
-        # True 트리거 이후 일정 시간 지난 다음에 다시 트리거 체크
-        # 트리거 True값이 남아있는 시간 고려를 위함
-        if self.last_wakeup_time is not None:
-            if (now - self.last_wakeup_time) < self.wakeup_cooldown:
-                print("되돌아가기 (cooldown)")
+        try:
+            # supervisor 실행 중이면 wakeup 감지 건너뛰기
+            if self.supervisor_running:
                 return
-        
-        if self.wakeup.is_wakeup():
-            self.get_logger().info("Wakeup detected")
-            # 트리거 True된 시점 저장
-            self.last_wakeup_time = now
 
-            self.waiting_for_wakeup = False
-            self.listen_and_process()
-            self.waiting_for_wakeup = True
-        # ---------------------------------------------------------
+            if not self.waiting_for_wakeup:
+                return
 
-    def publish_name_periodic(self):
-        if self.last_name is None:
-            return  # 아직 name이 없으면 아무 것도 안 함
-
-        msg = String()
-        msg.data = self.last_name
-        self.name_publisher.publish(msg)
-        self.get_logger().debug(f"Republished name: {self.last_name}")
+            if self.wakeup.is_wakeup():
+                self.get_logger().info("Wakeup detected")
+                self.waiting_for_wakeup = False
+                self.listen_and_process()
+                self.waiting_for_wakeup = True
+        finally:
+            self.check_in_progress = False
 
     def listen_and_process(self):
         """마이크로 음성을 듣고 텍스트로 변환한 뒤 DB에 저장"""
@@ -154,7 +134,6 @@ class STTNode(Node):
                 if not any(word in n for word in stop_words)
             ]
             # 제외 리스트에 겹치는 말 거르기
-
             print("원본:", nouns)
             print("필터 후:", filtered)
 
@@ -162,48 +141,20 @@ class STTNode(Node):
             name = filtered[0]
             menu = " ".join(filtered[1:])
 
-            print(name, menu)
-
             # DB에 저장
-            self.save_to_database(name,menu)
+            self.save_to_database(name, menu)
 
-            # 이름 퍼블리시 위해 변수 저장
+            # 이름 퍼블리시
             self.last_name = name
+            msg = String()
+            msg.data = name
+            self.name_publisher.publish(msg)
+            self.get_logger().info(f"Published customer name: {name}")
 
         except Exception as e:
             self.get_logger().error(f"Error in listen_and_process: {e}")
-        '''
-        try:
-            self.get_logger().info("Listening...")
-
-            with self.microphone as source:
-                # 음성 입력 대기 (timeout=5초, phrase_time_limit=10초)
-                audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=10)
-
-            self.get_logger().info("Processing speech...")
-
-            # Google Speech Recognition API 사용
-            text = self.recognizer.recognize_google(audio, language='ko-KR')
-            self.get_logger().info(f"Recognized text: {text}")
-
-            # DB에 저장
-            self.save_to_database(text)
-
-        except sr.WaitTimeoutError:
-            self.get_logger().debug("No speech detected (timeout)")
-        except sr.UnknownValueError:
-            self.get_logger().warn("Could not understand audio")
-        except sr.RequestError as e:
-            self.get_logger().error(f"Could not request results from Google Speech Recognition service; {e}")
-        except Exception as e:
-            self.get_logger().error(f"Error in listen_and_process: {e}")
-
-        '''
 
     def save_to_database(self, text: str, text2: str):
-        """인식된 텍스트를 데이터베이스에 저장"""
-        #timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
         # INSERT 쿼리 작성
         query = f"""
         INSERT INTO bartender_order_history (name, menu )
@@ -213,7 +164,7 @@ class STTNode(Node):
         # DB에 쿼리 전송 및 응답 대기
         request_id = self.db_client.execute_query_with_response(
             query,
-            callback=self.on_db_response
+          #  callback=self.on_db_response
         )
 
         self.get_logger().info(f"Sent query to DB (request_id: {request_id})")
@@ -230,28 +181,6 @@ class STTNode(Node):
             self.get_logger().error(f"Failed to save to database: {response_data.get('error')}")
 
     # ============ SELECT 쿼리 예시들 ============
-
-    def query_recent_logs(self, limit: int = 10):
-        """
-        최근 N개의 STT 로그 조회 (parameter 예시)
-
-        Args:
-            limit: 조회할 개수
-        """
-        query = f"""
-        SELECT id, text, created_at
-        FROM stt_logs
-        ORDER BY created_at DESC
-        LIMIT {limit}
-        """
-
-        request_id = self.db_client.execute_query_with_response(
-            query,
-            callback=self.on_select_response
-        )
-
-        self.get_logger().info(f"Querying recent {limit} logs (request_id: {request_id})")
-
     def query_logs_by_keyword(self, keyword: str = '유성'):
         """
         특정 키워드를 포함하는 로그 조회 (LIKE 사용 예시)
@@ -261,7 +190,6 @@ class STTNode(Node):
         """
         # SQL Injection 방지를 위해 single quote escape
         escaped_keyword = keyword.replace("'", "''")
-        #escaped_keyword = '유성'
         query = f"""
         SELECT name, percent
         FROM bartender_order_history
@@ -275,28 +203,6 @@ class STTNode(Node):
         )
 
         self.get_logger().info(f"Querying logs with keyword '{keyword}' (request_id: {request_id})")
-
-    def query_logs_by_date_range(self, start_date: str, end_date: str):
-        """
-        특정 날짜 범위의 로그 조회 (날짜 parameter 예시)
-
-        Args:
-            start_date: 시작 날짜 (YYYY-MM-DD HH:MM:SS)
-            end_date: 종료 날짜 (YYYY-MM-DD HH:MM:SS)
-        """
-        query = f"""
-        SELECT id, text, created_at
-        FROM stt_logs
-        WHERE created_at BETWEEN '{start_date}' AND '{end_date}'
-        ORDER BY created_at DESC
-        """
-
-        request_id = self.db_client.execute_query_with_response(
-            query,
-            callback=self.on_select_response
-        )
-
-        self.get_logger().info(f"Querying logs from {start_date} to {end_date} (request_id: {request_id})")
 
     def on_select_response(self, response_data: dict):
         """DB SELECT 쿼리 응답 처리"""
@@ -316,10 +222,16 @@ class STTNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = STTNode(OPENAI_API_KEY)  # __init__에서 query_logs_by_keyword 자동 실행
+    node = STTNode(OPENAI_API_KEY)
+
+    # MultiThreadedExecutor 사용 (서비스 호출이 콜백 안에서 완료되려면 필요)
+    #from rclpy.executors import MultiThreadedExecutor
+    #executor = MultiThreadedExecutor()
+    #executor.add_node(node)
 
     try:
-        rclpy.spin(node)
+     #   executor.spin()
+     rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:

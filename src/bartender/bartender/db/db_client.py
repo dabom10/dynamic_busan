@@ -109,7 +109,7 @@ class DBClient:
         msg = String()
         msg.data = json.dumps(request_data)
         self.query_request_pub.publish(msg)
-        self.node.get_logger().info(f"Query request published [{request_id}]: {query}")
+        #self.node.get_logger().info(f"Query request published [{request_id}]: {query}")
 
         return request_id
 

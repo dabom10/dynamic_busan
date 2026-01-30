@@ -10,3 +10,4 @@ __pycache__/
 .env
 query_node.py
 command.txt
+db.launch.py
