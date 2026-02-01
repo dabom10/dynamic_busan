@@ -79,7 +79,7 @@ def get_zone_from_bbox(bbox, frame_width):
 class PersonTracker:
     """YOLOv8 + ByteTrack 기반 사람 추적기 (이름 지원)"""
 
-    def __init__(self, model_path='yolov8n.pt', conf=0.35, lost_threshold=30, frame_width=1280):
+    def __init__(self, model_path='yolov8s.pt', conf=0.35, lost_threshold=30, frame_width=1280):
         self.model = YOLO(model_path)
         self.conf = conf
         self.lost_threshold = lost_threshold
@@ -91,6 +91,47 @@ class PersonTracker:
         self.frame_count = 0
         self.disappeared_persons = []  # [(track_id, name, zone), ...]
         self.new_persons = []
+
+        # =====================================================================
+        # 히스테리시스(Hysteresis) - 구역 안정화
+        # ---------------------------------------------------------------------
+        # 문제: 사람이 구역 경계에 서있으면 바운딩박스가 프레임마다 미세하게
+        #       흔들리면서 구역이 1↔2 계속 왔다갔다 함 (진동/깜빡임)
+        #
+        # 해결: 최근 N프레임의 구역을 기록하고 다수결로 최종 구역 결정
+        #       - 경계에서 흔들림 → 무시됨 (노이즈 필터링)
+        #       - 실제 이동 → 반영됨 (다수결이 바뀌면 구역 전환)
+        #
+        # 효과: 약 0.17초(5프레임) 지연이 생기지만 안정적인 구역 표시
+        # =====================================================================
+        self.zone_history = {}  # {track_id: [zone1, zone2, ...]}
+        self.zone_history_len = 5  # 히스테리시스 윈도우 크기
+
+    def get_stable_zone(self, track_id, current_zone):
+        """히스테리시스를 적용하여 안정적인 구역 반환
+
+        최근 N프레임의 구역을 다수결로 결정하여 경계에서의 진동 방지
+
+        Args:
+            track_id: 추적 ID
+            current_zone: 현재 프레임에서 계산된 구역
+
+        Returns:
+            int: 안정화된 구역 번호 (1, 2, 3)
+        """
+        from collections import Counter
+
+        if track_id not in self.zone_history:
+            self.zone_history[track_id] = []
+
+        # 현재 구역 기록
+        self.zone_history[track_id].append(current_zone)
+
+        # 최근 N개만 유지
+        self.zone_history[track_id] = self.zone_history[track_id][-self.zone_history_len:]
+
+        # 다수결로 구역 결정
+        return Counter(self.zone_history[track_id]).most_common(1)[0][0]
 
     def assign_name_to_zone(self, zone, name):
         """특정 구역의 사람에게 이름 할당
@@ -185,7 +226,8 @@ class PersonTracker:
                     x1, y1, x2, y2 = bbox
                     current_ids.add(track_id)
 
-                    zone = get_zone_from_bbox(bbox, self.frame_width)
+                    raw_zone = get_zone_from_bbox(bbox, self.frame_width)
+                    zone = self.get_stable_zone(track_id, raw_zone)  # 히스테리시스 적용
                     zone_counts[zone - 1] += 1
 
                     # 기존 정보 유지 (이름 등)
@@ -223,6 +265,9 @@ class PersonTracker:
                     print(f"[LOST] 사람 사라짐: ID {track_id} (구역 {zone})")
 
                 del self.tracked_persons[track_id]
+                # 히스테리시스 히스토리도 정리
+                if track_id in self.zone_history:
+                    del self.zone_history[track_id]
 
         events = {
             'new': self.new_persons,
@@ -369,8 +414,8 @@ class PersonTrackingNode(Node):
 
         # Parameters
         self.declare_parameter('camera_id', 0)
-        self.declare_parameter('confidence', 0.35)
-        self.declare_parameter('lost_threshold', 30)
+        self.declare_parameter('confidence', 0.5)   # 신뢰도 임계값
+        self.declare_parameter('lost_threshold', 60)
         self.declare_parameter('show_window', True)
 
         self.camera_id = self.get_parameter('camera_id').value
