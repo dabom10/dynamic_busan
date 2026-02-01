@@ -267,9 +267,9 @@ class BartenderBot(Node):
         self.get_logger().info("▶ [3/7] 병 픽")
 
         # 병 위치 (하드코딩) - 컵과 다른 위치
-        bx, by, bz = 350, 200, 56.0
-        # 수평 집기 (Ry=90도 가정)
-        rx, ry, rz = 0.0, 90.0, 0.0
+        bx, by, bz = 350, 200, 130.0
+        # 수평 집기 (Ry=-90도 가정)
+        rx, ry, rz = 0.0, -90.0, 0.0
         self.bottle_origin = [bx, by, bz, rx, ry, rz]
 
         self.release()
@@ -299,9 +299,9 @@ class BartenderBot(Node):
         wait(0.5)
 
         # 2. 기울이기 (Pitch 회전)
-        # 수평(90) -> 붓기 각도(예: +45도 -> 135도)
+        # 수평(-90) -> 붓기 각도(예: -45도 -> -135도)
         self.get_logger().info("   - 기울이기...")
-        movel(posx([cx, cy, cz + approach_z, brx, bry + 45.0, brz]), vel=[40, 40], acc=[40, 40])
+        movel(posx([cx, cy, cz + approach_z, brx, bry - 45.0, brz]), vel=[40, 40], acc=[40, 40])
         
         # 3. 붓기 시간
         self.get_logger().info("   - 붓는 중 (3초)")
