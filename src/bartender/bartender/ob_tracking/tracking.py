@@ -23,9 +23,6 @@ tracking.py - ROS2 사람 추적 노드 (바텐더 연동 버전)
 실행 방법:
     ros2 run bartender tracking
 
-디버깅/테스트:
-    debug/tracking_debug_v1.py (ROS2 없이 단독 실행)
-    debug/tracking_debug_v2.py (구역 판단 버전)
 """
 
 import time
@@ -38,7 +35,7 @@ from ultralytics import YOLO
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, Int32, Float32MultiArray, Int32MultiArray, String
-
+from srv_interfaces.srv import DrinkDelivery
 
 # =============================================================================
 # 로봇팔 구역별 좌표 (미리 캘리브레이션된 값)
@@ -51,8 +48,7 @@ ZONE_POSITIONS = {
     2: [318.21, -245.0, 56.0, 29.08, 180.0, 29.02],   # 구역2 (화면 중앙)
     3: [208.26, -245.0, 56.0, 29.08, 180.0, 29.02],   # 구역3 (화면 오른쪽)
 }
-
-
+ROBOT_ID = "dsr01"
 # =============================================================================
 # 구역 판단 함수
 # =============================================================================
@@ -76,7 +72,6 @@ def get_zone_from_bbox(bbox, frame_width):
         return 2
     else:
         return 3
-
 
 # =============================================================================
 # PersonTracker 클래스
@@ -370,7 +365,7 @@ class PersonTrackingNode(Node):
     """
 
     def __init__(self):
-        super().__init__('person_tracking_node')
+        super().__init__('person_tracking_node', namespace=ROBOT_ID)
 
         # Parameters
         self.declare_parameter('camera_id', 0)
@@ -388,8 +383,8 @@ class PersonTrackingNode(Node):
         # ---------------------------------------------------------------------
         self.sub_customer_name = self.create_subscription(
             String, '/customer_name', self.customer_name_callback, 10)
-        self.sub_make_done = self.create_subscription(
-            Bool, '/make_done', self.make_done_callback, 10)
+        # self.sub_make_done = self.create_subscription(
+        #     Bool, '/make_done', self.make_done_callback, 10)
 
         # ---------------------------------------------------------------------
         # Publishers
@@ -398,8 +393,17 @@ class PersonTrackingNode(Node):
         self.pub_count = self.create_publisher(Int32, '/person_count', 10)
         self.pub_zone_status = self.create_publisher(Int32MultiArray, '/zone_status', 10)
         self.pub_active_zone = self.create_publisher(Int32, '/active_zone', 10)
-        self.pub_zone_robot_pos = self.create_publisher(Float32MultiArray, '/zone_robot_pos', 10)
+        # self.pub_zone_robot_pos = self.create_publisher(Float32MultiArray, '/zone_robot_pos', 10)
         self.pub_disappeared_name = self.create_publisher(String, '/disappeared_customer_name', 10)
+
+        # ---------------------------------------------------------------------
+        # Services
+        # ---------------------------------------------------------------------
+        self.srv_drink_delivery = self.create_service(
+            DrinkDelivery,
+            'get_pose',
+            self.make_done_callback
+        )
 
         # ---------------------------------------------------------------------
         # 상태 변수
@@ -459,11 +463,13 @@ class PersonTrackingNode(Node):
             self.pending_customer_name_time = time.time()
             self.get_logger().warn(f'[NAME] 할당할 사람 없음. 대기 중: "{name}" (2초 타임아웃)')
 
-    def make_done_callback(self, msg):
+    def make_done_callback(self, request, response):
         """제작 완료 신호 수신 콜백"""
-        self.get_logger().info('test')
-        if not msg.data:
-            return
+        # self.get_logger().info('제작 완료')
+        if not request.finish:
+            response.goal_position = []
+            self.get_logger().info(f'False')
+            return response
 
         self.get_logger().info('[SUB] 제작 완료 신호 수신!')
 
@@ -472,12 +478,13 @@ class PersonTrackingNode(Node):
 
         if zone > 0:
             robot_pos = ZONE_POSITIONS[zone]
-            pos_msg = Float32MultiArray()
-            pos_msg.data = [float(x) for x in robot_pos]
-            self.pub_zone_robot_pos.publish(pos_msg)
+            # pos_msg = Float32MultiArray()
+            response.goal_position = [float(x) for x in robot_pos]
             self.get_logger().info(f'[PUB] 구역 {zone} 로봇 좌표: {robot_pos}')
         else:
+            response.goal_position = []
             self.get_logger().warn('[WARN] 이름이 할당된 고객이 없습니다.')
+        return response
 
     def process_frame(self):
         """프레임 처리"""
