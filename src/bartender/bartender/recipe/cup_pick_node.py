@@ -24,7 +24,7 @@ from rclpy.qos import qos_profile_sensor_data
 ROBOT_ID = "dsr01"
 ROBOT_MODEL = "m0609"
 ROBOT_TOOL = "Tool Weight"
-ROBOT_TCP = "GripperDA_v2"
+ROBOT_TCP = "GripperDA_v1"
 
 VELJ = 60
 ACCJ = 60
@@ -214,64 +214,162 @@ class BartenderBot(Node):
     # 실행
     # ===============================
 
-    def run(self):
-        self.get_logger().info("컵 픽 프로세스 시작")
-
-        from DSR_ROBOT2 import movej, movel, posx, wait, DR_MV_MOD_REL
-
-        # 1. 스캔 위치
+    def move_to_ready(self):
+        from DSR_ROBOT2 import movej, wait
+        self.get_logger().info("▶ [1/7] 초기 위치 이동")
         movej(J_READY, vel=VELJ, acc=ACCJ)
         wait(1.0)
 
-        # 2. 컵 인식 (존재 여부만 확인)
+    def pick_cup(self):
+        from DSR_ROBOT2 import movel, posx, wait, DR_MV_MOD_REL
+        self.get_logger().info("▶ [2/7] 컵 픽 & 배치 (Pouring Position)")
+
+        # 1. 컵 인식
         pos = self.find_object()
-        if pos is None:
-            self.get_logger().error("❌ 컵 인식 실패 → 작업 종료")
-            return
+        
+        # 좌표 설정 (인식 실패 시 하드코딩)
+        if pos is not None:
+            bx, by, bz = self.transform_to_base(pos)
+            self.get_logger().info(f"   - 인식된 좌표: {bx:.1f}, {by:.1f}, {bz:.1f}")
+        else:
+            self.get_logger().warn("   - 인식 실패: 하드코딩 좌표 사용")
+            bx, by, bz = 436.0, -245.0, 56.0 # 예시 좌표
 
-        self.get_logger().info("✅ 컵 인식 성공")
-
-        # 3. 좌표 변환 (Camera -> Base)
-        bx, by, bz = self.transform_to_base(pos)
-        self.get_logger().info(f"🎯 변환된 타겟 좌표: {bx:.2f}, {by:.2f}, {bz:.2f}")
         rx, ry, rz = 19.83, 180.0, 19.28
 
-        # 4. 접근
+        # 접근 및 픽
         self.release()
         movel(posx([bx, by, bz + 100, rx, ry, rz]), vel=[100, 100], acc=[100, 100])
-        wait(0.3)
-
-        # 5. 픽
         movel(posx([bx, by, bz - 20, rx, ry, rz]), vel=[50, 50], acc=[50, 50])
-        wait(0.2)
+        wait(0.5)
         self.grip()
         wait(0.5)
 
-        # 6. 리프트
-        movel(posx([0, 0, 150, 0, 0, 0]),
-            vel=[100, 100], acc=[100, 100], mod=DR_MV_MOD_REL)
+        # 리프트
+        movel(posx([0, 0, 150, 0, 0, 0]), vel=[100, 100], acc=[100, 100], mod=DR_MV_MOD_REL)
+
+        # 붓기 위치(중앙)로 이동 및 배치
+        # 붓기 편한 위치로 설정
+        self.pour_pos = [350, 0, 150.0, rx, ry, rz] 
+        px, py, pz, prx, pry, prz = self.pour_pos
+
+        movel(posx([px, py, pz + 150, prx, pry, prz]), vel=[100, 100], acc=[100, 100])
+        movel(posx(self.pour_pos), vel=[50, 50], acc=[50, 50])
         wait(0.5)
-
-        # 7. 홈 위치로 이동 (컵 들고 이동)
-        self.get_logger().info("홈 위치로 이동")
-        movej(J_READY, vel=VELJ, acc=ACCJ)
-        wait(1.0)
-
-        # 8. 내려놓기 (홈 위치 기준)
-        self.get_logger().info("컵 내려놓기")
-        movel(posx([0, 0, -80, 0, 0, 0]),
-            vel=[50, 50], acc=[50, 50], mod=DR_MV_MOD_REL)
-        wait(0.3)
-
         self.release()
         wait(0.5)
+        
+        # 안전 높이로 후퇴
+        movel(posx([0, 0, 150, 0, 0, 0]), vel=[100, 100], acc=[100, 100], mod=DR_MV_MOD_REL)
 
-        # 9. 복귀
-        movel(posx([0, 0, 80, 0, 0, 0]),
-            vel=[100, 100], acc=[100, 100], mod=DR_MV_MOD_REL)
+    def pick_bottle(self):
+        from DSR_ROBOT2 import movel, posx, wait, DR_MV_MOD_REL
+        self.get_logger().info("▶ [3/7] 병 픽")
+
+        # 병 위치 (하드코딩) - 컵과 다른 위치
+        bx, by, bz = 350, 200, 130.0
+        # 수평 집기 (Ry=-90도 가정)
+        rx, ry, rz = 0.0, -90.0, 0.0
+        self.bottle_origin = [bx, by, bz, rx, ry, rz]
+
+        self.release()
+        # 접근
+        movel(posx([bx, by, bz + 150, rx, ry, rz]), vel=[100, 100], acc=[100, 100])
+        # 픽
+        movel(posx([bx, by, bz, rx, ry, rz]), vel=[50, 50], acc=[50, 50])
+        wait(0.5)
+        self.grip()
+        wait(0.5)
+        # 리프트
+        movel(posx([0, 0, 200, 0, 0, 0]), vel=[100, 100], acc=[100, 100], mod=DR_MV_MOD_REL)
+
+    def pour_motion(self):
+        from DSR_ROBOT2 import movel, posx, wait
+        self.get_logger().info("▶ [4/7] 붓기 동작")
+
+        # 컵 위치 위로 이동
+        # 컵의 위치(xyz)만 가져오고, 회전(rpy)은 병을 잡은 상태(bottle_origin)를 기준
+        cx, cy, cz = self.pour_pos[:3]
+        brx, bry, brz = self.bottle_origin[3:]
+        
+        approach_z = 250 # 컵보다 충분히 높게
+
+        # 1. 컵 상공 이동 (병 자세 유지)
+        movel(posx([cx, cy, cz + approach_z, brx, bry, brz]), vel=[100, 100], acc=[100, 100])
         wait(0.5)
 
-        self.get_logger().info("✅ 컵 픽 & 플레이스 완료")
+        # 2. 기울이기 (Pitch 회전)
+        # 수평(-90) -> 붓기 각도(예: -45도 -> -135도)
+        self.get_logger().info("   - 기울이기...")
+        movel(posx([cx, cy, cz + approach_z, brx, bry - 45.0, brz]), vel=[40, 40], acc=[40, 40])
+        
+        # 3. 붓기 시간
+        self.get_logger().info("   - 붓는 중 (3초)")
+        time.sleep(3.0)
+
+        # 4. 복귀
+        self.get_logger().info("   - 복귀")
+        movel(posx([cx, cy, cz + approach_z, brx, bry, brz]), vel=[40, 40], acc=[40, 40])
+        wait(0.5)
+
+    def place_bottle_back(self):
+        from DSR_ROBOT2 import movel, posx, wait, DR_MV_MOD_REL
+        self.get_logger().info("▶ [5/7] 병 원위치 복귀")
+
+        bx, by, bz, rx, ry, rz = self.bottle_origin
+
+        # 접근
+        movel(posx([bx, by, bz + 150, rx, ry, rz]), vel=[100, 100], acc=[100, 100])
+        # 놓기
+        movel(posx([bx, by, bz, rx, ry, rz]), vel=[50, 50], acc=[50, 50])
+        wait(0.5)
+        self.release()
+        wait(0.5)
+        # 퇴장
+        movel(posx([0, 0, 150, 0, 0, 0]), vel=[100, 100], acc=[100, 100], mod=DR_MV_MOD_REL)
+
+    def place_cup_home(self):
+        from DSR_ROBOT2 import movel, posx, wait, DR_MV_MOD_REL
+        self.get_logger().info("▶ [6/7] 컵 복귀")
+
+        # 붓기 위치의 컵 잡기
+        cx, cy, cz, rx, ry, rz = self.pour_pos
+
+        self.release()
+        movel(posx([cx, cy, cz + 150, rx, ry, rz]), vel=[100, 100], acc=[100, 100])
+        movel(posx([cx, cy, cz, rx, ry, rz]), vel=[50, 50], acc=[50, 50])
+        wait(0.5)
+        self.grip()
+        wait(0.5)
+        
+        # 리프트
+        movel(posx([0, 0, 150, 0, 0, 0]), vel=[100, 100], acc=[100, 100], mod=DR_MV_MOD_REL)
+
+        # 원래 위치(또는 지정된 홈)로 이동
+        # 여기서는 간단히 오른쪽 구석으로 이동
+        tx, ty, tz = 350, -200, 56.0
+        
+        movel(posx([tx, ty, tz + 150, rx, ry, rz]), vel=[100, 100], acc=[100, 100])
+        movel(posx([tx, ty, tz, rx, ry, rz]), vel=[50, 50], acc=[50, 50])
+        wait(0.5)
+        self.release()
+        wait(0.5)
+        
+        movel(posx([0, 0, 150, 0, 0, 0]), vel=[100, 100], acc=[100, 100], mod=DR_MV_MOD_REL)
+
+    def run(self):
+        self.get_logger().info("=== 바텐더 모션 검증 시작 ===")
+        
+        # 순서대로 실행하는 거 if문으로 만들기(run 안에서 바꾸면 되겠다) --> 액션하려고 
+        self.move_to_ready()
+        self.pick_cup()
+        self.pick_bottle()
+        self.pour_motion()
+        self.place_bottle_back()
+        self.place_cup_home()
+        self.move_to_ready()
+        
+        self.get_logger().info("=== 바텐더 모션 검증 완료 ===")
 
 
 def main():
@@ -281,6 +379,15 @@ def main():
 
     node = BartenderBot()
     DR_init.__dsr__node = node
+
+    from DSR_ROBOT2 import get_tcp
+    # 조건 불일치 → offset 값 올리기
+    if get_tcp() != ROBOT_TCP:
+        print(f"엔드이펙터 - Gripper 오류: {get_tcp()} != {ROBOT_TCP}")
+        node.destroy_node()
+        rclpy.shutdown()
+        return
+    print(f"엔드이펙터 - Gripper : {get_tcp()}")
 
     try:
         node.run()
