@@ -4,6 +4,8 @@
 import os
 import time
 import json
+import sys
+import threading
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
@@ -14,7 +16,6 @@ from ultralytics import YOLO
 from cv_bridge import CvBridge
 from sensor_msgs.msg import Image, CameraInfo
 from scipy.spatial.transform import Rotation
-from ament_index_python.packages import get_package_share_directory
 from rclpy.qos import qos_profile_sensor_data
 
 # ========================================
@@ -22,7 +23,7 @@ from rclpy.qos import qos_profile_sensor_data
 # ========================================
 ROBOT_ID = "dsr01"
 ROBOT_MODEL = "m0609"
-ROBOT_TOOL = "Tool Weight"
+ROBOT_TOOL = "Do"
 ROBOT_TCP = "GripperDA_v1"
 
 VELJ = 60
@@ -45,8 +46,7 @@ class BartenderBot(Node):
         self.intrinsics = None
 
         # === 경로 설정 ===
-        pkg_share = get_package_share_directory("bartender")
-        recipe_dir = os.path.join(pkg_share, "recipe")
+        recipe_dir = os.path.dirname(os.path.abspath(__file__))
         transform_path = os.path.join(recipe_dir, "T_gripper2camera.npy")
         recipe_path = os.path.join(recipe_dir, "recipe.json")
 
@@ -69,6 +69,10 @@ class BartenderBot(Node):
         self.recipe_queue = []
         self.current_recipe = None
 
+        # 텍스트 입력을 위한 스레드 시작
+        self.input_thread = threading.Thread(target=self.input_task, daemon=True)
+        self.input_thread.start()
+
         # 카메라 구독
         self.create_subscription(
             Image, "/camera/camera/color/image_raw",
@@ -84,6 +88,22 @@ class BartenderBot(Node):
         )
 
         self.get_logger().info("BartenderBot 초기화 완료")
+
+    # ===============================
+    # 입력 스레드
+    # ===============================
+    def input_task(self):
+        """콘솔에서 레시피 ID를 입력받아 큐에 추가"""
+        while rclpy.ok():
+            try:
+                print("\n[입력] 실행할 레시피 ID를 입력하세요 (예: blue_sapphire): ", end='', flush=True)
+                line = sys.stdin.readline()
+                if line:
+                    rid = line.strip()
+                    if rid:
+                        self.recipe_queue.append(rid)
+            except Exception:
+                time.sleep(1)
 
     # ===============================
     # 카메라 콜백
@@ -238,14 +258,19 @@ class BartenderBot(Node):
         movel(posx([cx, cy, cz + approach_z, brx, bry, brz]), vel=[40, 40], acc=[40, 40])
         wait(0.5)
 
-    def place_object_home(self, obj_pos, home_pos):
-        from DSR_ROBOT2 import movel, posx, wait, DR_MV_MOD_REL
-        self.release()
-        movel(posx([obj_pos[0], obj_pos[1], obj_pos[2] + 150, obj_pos[3], obj_pos[4], obj_pos[5]]), vel=[100, 100], acc=[100, 100])
-        movel(posx([home_pos[0], home_pos[1], home_pos[2], home_pos[3], home_pos[4], home_pos[5]]), vel=[50, 50], acc=[50, 50])
+    def place_object(self, target_pos):
+        """물체를 특정 위치에 내려놓는 함수"""
+        from DSR_ROBOT2 import movel, posx, wait
+        tx, ty, tz, rx, ry, rz = target_pos
+        # 접근 (Z + 100)
+        movel(posx([tx, ty, tz + 100, rx, ry, rz]), vel=[100, 100], acc=[100, 100])
+        # 내려놓기 (Target Z)
+        movel(posx([tx, ty, tz, rx, ry, rz]), vel=[50, 50], acc=[50, 50])
         wait(0.5)
         self.release()
-        movel(posx([0, 0, 150, 0, 0, 0]), vel=[100, 100], acc=[100, 100], mod=DR_MV_MOD_REL)
+        wait(0.5)
+        # 복귀 (Z + 100)
+        movel(posx([tx, ty, tz + 100, rx, ry, rz]), vel=[100, 100], acc=[100, 100])
 
     # ===============================
     # 레시피 실행
@@ -259,39 +284,43 @@ class BartenderBot(Node):
 
         self.move_to_ready()
 
-        # 컵 픽 & 홈 위치 이동
+        # 1. 컵 픽 & 믹싱 스테이션(홈 좌표)으로 이동
         cup_hardcoded = [436, -245, 56, 19.83, 180.0, 19.28]  # 필요 시 조정
         cup_pos = self.pick_object(hardcoded_pos=cup_hardcoded)
+        
+        if cup_pos is None:
+            self.get_logger().error("컵을 집지 못했습니다.")
+            return
 
-        # 각 liquors 붓기
+        # 믹싱 스테이션 좌표 (로봇 앞쪽, 홈 좌표)
+        mixing_pos = [300, 0, 56, 0, 180, 0]
+        self.place_object(mixing_pos)
+
+        # 2. 각 liquors 붓기
         for liquor in recipe["liquors"]:
             # 병 픽
-            bottle_hardcoded = [350, 200, 130, 0, -90, 0]  # 필요 시 조정
+            # 병은 수직(180도)으로 집어야 붓기 동작(Tilt)이 자연스러움
+            bottle_hardcoded = [350, 200, 130, 0, 180, 0]
             bottle_pos = self.pick_object(hardcoded_pos=bottle_hardcoded)
+            
             if bottle_pos:
-                self.pour_liquor(cup_pos, bottle_pos, liquor["pour_time"])
-                self.place_object_home(bottle_pos, bottle_hardcoded)
+                # 믹싱 위치에 있는 컵에 붓기
+                self.pour_liquor(mixing_pos, bottle_pos, liquor["pour_time"])
+                # 병 원위치
+                self.place_object(bottle_pos)
 
-        # 컵 원위치
-        self.place_object_home(cup_pos, cup_hardcoded)
+        # 3. 완료 후 홈 위치로 복귀
         self.move_to_ready()
         self.get_logger().info(f"=== 레시피 완료: {recipe['display_name']} ===")
 
     # ===============================
     # DB 큐 실행
     # ===============================
-    def fetch_recipe_queue(self):
-        new_recipes = query_logs_by_keyword("")
-        for r in new_recipes:
-            if r not in self.recipe_queue:
-                self.recipe_queue.append(r)
-                self.get_logger().info(f"큐에 추가: {r}")
-
     def process_queue(self):
         self.get_logger().info("레시피 큐 실행 시작")
+        self.get_logger().info("레시피 처리 루프 시작 (입력 대기)")
         while rclpy.ok():
             rclpy.spin_once(self, timeout_sec=0.1)
-            self.fetch_recipe_queue()
             if self.recipe_queue and self.current_recipe is None:
                 self.current_recipe = self.recipe_queue.pop(0)
                 self.get_logger().info(f"실행 중: {self.current_recipe}")
