@@ -1,286 +1,307 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-import os
-import time
 import rclpy
 from rclpy.node import Node
+from sensor_msgs.msg import Image, CameraInfo
+from cv_bridge import CvBridge
+from srv_interfaces.srv import DrinkDelivery
+from geometry_msgs.msg import Point
 import DR_init
-from std_msgs.msg import String
-from std_srvs.srv import Trigger
-
 import cv2
 import numpy as np
 from ultralytics import YOLO
-from cv_bridge import CvBridge
-from sensor_msgs.msg import Image, CameraInfo
-from scipy.spatial.transform import Rotation
-from ament_index_python.packages import get_package_share_directory
-from rclpy.qos import qos_profile_sensor_data
+import pyrealsense2 as rs2
 
-
-# ========================================
-# 로봇 설정
-# ========================================
 ROBOT_ID = "dsr01"
 ROBOT_MODEL = "m0609"
 ROBOT_TOOL = "Tool Weight"
 ROBOT_TCP = "GripperDA_v2"
 
-VELJ = 60
-ACCJ = 60
-J_READY = [0, 0, 90, 0, 90, 0]
-
-
-class Topping(Node):
+class ToppingNode(Node):
     def __init__(self):
-        super().__init__("topping", namespace=ROBOT_ID)
-
-        # self.status_pub = self.create_publisher(String, "status", 10)
+        super().__init__("topping_node", namespace=ROBOT_ID)
+        
+        # YOLO 모델 로드
+        self.model = YOLO('yolov8s.pt')  # 또는 'yolov8n.pt'
         self.bridge = CvBridge()
+        
+        # RealSense 카메라 구독
+        self.color_sub = self.create_subscription(
+            Image, '/camera/color/image_raw', self.color_callback, 10)
+        self.depth_sub = self.create_subscription(
+            Image, '/camera/aligned_depth_to_color/image_raw', self.depth_callback, 10)
+        self.camera_info_sub = self.create_subscription(
+            CameraInfo, '/camera/color/camera_info', self.camera_info_callback, 10)
+        
+        # 서비스 클라이언트
+        self.delivery_client = self.create_client(DrinkDelivery, 'get_pose')
+        
+        # 데이터 저장
+        self.color_image = None
+        self.depth_image = None
+        self.camera_intrinsics = None
+        
+        # 토핑 클래스 매핑 (YOLO 학습 시 사용한 클래스명)
+        self.topping_classes = {
+            'white_duck': 0,
+            'yellow_duck': 1,
+            'leaf': 2
+        }
+        
+        # 주요 위치 정의 (임의 좌표로, 수정 필요)
+        self.TOPPING_STATION = [300, 0, 400, 0, 180, 0]  # 토핑 인식 위치
+        self.DRINK_STATION = [250, 100, 350, 0, 180, 0]  # 음료 위치
+        self.HOME_POSITION = [0, 0, 90, 0, 90, 0]
+        
+        # 카메라-로봇 변환 행렬 (캘리브레이션 필요)
+        self.camera_to_robot_transform = np.eye(4)
+        
+        self.get_logger().info("토핑 노드 초기화 완료")
 
-        self.color_frame = None
-        self.depth_frame = None
-        self.intrinsics = None
+    def camera_info_callback(self, msg):
+        """카메라 내부 파라미터 저장"""
+        if self.camera_intrinsics is None:
+            self.camera_intrinsics = rs2.intrinsics()
+            self.camera_intrinsics.width = msg.width
+            self.camera_intrinsics.height = msg.height
+            self.camera_intrinsics.ppx = msg.k[2]
+            self.camera_intrinsics.ppy = msg.k[5]
+            self.camera_intrinsics.fx = msg.k[0]
+            self.camera_intrinsics.fy = msg.k[4]
+            self.camera_intrinsics.model = rs2.distortion.brown_conraddy
+            self.camera_intrinsics.coeffs = list(msg.d)
 
-        # === 경로 설정 ===
-        pkg_share = get_package_share_directory("bartender")
-        recipe_dir = os.path.join(pkg_share, "recipe")
-        transform_path = os.path.join(recipe_dir, "T_gripper2camera.npy")
+    def color_callback(self, msg):
+        """컬러 이미지 수신"""
+        self.color_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
 
-        # YOLO 모델 (절대경로, 디버깅용)
-        model_path = "/home/dabom/dynamic_busan/src/bartender/bartender/recipe/yolov8n.pt"
-        self.yolo = YOLO(model_path)
+    def depth_callback(self, msg):
+        """뎁스 이미지 수신"""
+        self.depth_image = self.bridge.imgmsg_to_cv2(msg, "passthrough")
 
-        if os.path.exists(transform_path):
-            self.gripper2cam = np.load(transform_path)
-        else:
-            self.get_logger().warn("⚠️ hand-eye 파일 없음 → identity 사용")
-            self.gripper2cam = np.eye(4)
-
-        # 카메라 구독
-        self.create_subscription(
-            Image, "/camera/camera/color/image_raw",
-            self.color_cb, qos_profile_sensor_data
-        )
-        self.create_subscription(
-            Image, "/camera/camera/aligned_depth_to_color/image_raw",
-            self.depth_cb, qos_profile_sensor_data
-        )
-        self.create_subscription(
-            CameraInfo, "/camera/camera/color/camera_info",
-            self.info_cb, qos_profile_sensor_data
-        )
-
-        self.get_logger().info("클래스 초기화 완료")
-
-    # ===============================
-    # 콜백
-    # ===============================
-    def color_cb(self, msg):
-        self.color_frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
-
-    def depth_cb(self, msg):
-        self.depth_frame = self.bridge.imgmsg_to_cv2(msg, "passthrough")
-
-    def info_cb(self, msg):
-        if self.intrinsics is None:
-            self.intrinsics = {
-                "fx": msg.k[0],
-                "fy": msg.k[4],
-                "ppx": msg.k[2],
-                "ppy": msg.k[5],
-            }
-
-    # ===============================
-    # 카메라 대기
-    # ===============================
-    def wait_camera(self):
-        self.get_logger().info("카메라 데이터 대기 중...")
-        while rclpy.ok():
-            rclpy.spin_once(self, timeout_sec=0.1)
-            if self.color_frame is not None and self.depth_frame is not None and self.intrinsics:
-                return True
-        return False
-
-    # ===============================
-    # 컵 탐지 (디버깅 핵심)
-    # ===============================
-    def find_topping_position(self, target_classes):
+    def detect_topping(self, target_topping):
         """
-        target_classes: [int, int, ...]  # YOLO class IDs of desired topping
-        return:
-            (cam_x, cam_y, cam_z) in mm
-            False if not detected
+        YOLO로 특정 토핑 감지
+        :param target_topping: 'white_duck', 'yellow_duck', 'leaf'
+        :return: (x, y, depth) 또는 None
         """
+        if self.color_image is None or self.depth_image is None:
+            self.get_logger().warn("카메라 이미지 없음")
+            return None
+        
+        # YOLO 추론
+        results = self.model(self.color_image)
+        
+        target_class_id = self.topping_classes.get(target_topping)
+        if target_class_id is None:
+            self.get_logger().error(f"알 수 없는 토핑: {target_topping}")
+            return None
+        
+        # 결과 파싱
+        for result in results:
+            boxes = result.boxes
+            for box in boxes:
+                cls = int(box.cls[0])
+                conf = float(box.conf[0])
+                
+                if cls == target_class_id and conf > 0.5:
+                    # 바운딩 박스 중심점
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    center_x = int((x1 + x2) / 2)
+                    center_y = int((y1 + y2) / 2)
+                    
+                    # 깊이 값 추출 (주변 픽셀 평균)
+                    depth_roi = self.depth_image[
+                        max(0, center_y-5):min(self.depth_image.shape[0], center_y+5),
+                        max(0, center_x-5):min(self.depth_image.shape[1], center_x+5)
+                    ]
+                    depth = np.median(depth_roi[depth_roi > 0])
+                    
+                    self.get_logger().info(
+                        f"{target_topping} 감지: pixel({center_x}, {center_y}), depth={depth}mm"
+                    )
+                    return (center_x, center_y, depth)
+        
+        self.get_logger().warn(f"{target_topping} 미감지")
+        return None
 
-        if not self.wait_camera():
-            return False
-
-        frame = self.color_frame.copy()
-
-        results = self.yolo.predict(
-            frame,
-            conf=0.25,
-            verbose=False
+    def pixel_to_robot_coords(self, pixel_x, pixel_y, depth):
+        """
+        픽셀 좌표 + 깊이 -> 로봇 좌표 변환
+        :return: [x, y, z, rx, ry, rz]
+        """
+        if self.camera_intrinsics is None:
+            self.get_logger().error("카메라 파라미터 없음")
+            return None
+        
+        # 픽셀 -> 3D 카메라 좌표
+        depth_m = depth / 1000.0  # mm to m
+        point_3d = rs2.rs2_deproject_pixel_to_point(
+            self.camera_intrinsics, [pixel_x, pixel_y], depth_m
         )
-
-        # 디버그 이미지
-        debug_img = results[0].plot()
-        cv2.imwrite("debug_topping_position.jpg", debug_img)
-
-        if len(results[0].boxes) == 0:
-            self.get_logger().warn("❌ YOLO 검출 결과 없음")
-            return False
-
-        # 🔹 특정 장식 클래스만 필터링
-        candidates = [
-            b for b in results[0].boxes
-            if int(b.cls[0]) in target_classes
+        
+        # 카메라 좌표계 -> 로봇 좌표계 변환
+        camera_point = np.array([point_3d[0], point_3d[1], point_3d[2], 1.0])
+        robot_point = self.camera_to_robot_transform @ camera_point
+        
+        # 로봇 포즈 형식으로 반환 (x, y, z, rx, ry, rz)
+        # 회전값은 그리퍼 방향에 따라 조정
+        robot_pose = [
+            robot_point[0] * 1000,  # m to mm
+            robot_point[1] * 1000,
+            robot_point[2] * 1000,
+            0, 180, 0  # 고정 회전값 (실제로는 조정 필요)
         ]
+        
+        return robot_pose
 
-        if not candidates:
-            self.get_logger().warn(
-                f"❌ 지정된 장식 클래스 {target_classes} 미검출"
-            )
-            return False
-
-        # 🔹 가장 confidence 높은 장식 선택
-        best = max(candidates, key=lambda b: float(b.conf[0]))
-
-        x1, y1, x2, y2 = best.xyxy[0].cpu().numpy()
-        cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
-
-        # 🔹 깊이 안정화 (ROI median)
-        roi = self.depth_frame[
-            max(0, cy-5):min(cy+5, self.depth_frame.shape[0]),
-            max(0, cx-5):min(cx+5, self.depth_frame.shape[1])
-        ]
-        valid_depths = roi[roi > 0]
-
-        if len(valid_depths) == 0:
-            self.get_logger().warn("❌ 장식 중심부 depth 없음")
-            return False
-
-        depth = float(np.median(valid_depths))
-
-        cam_x = (cx - self.intrinsics["ppx"]) * depth / self.intrinsics["fx"]
-        cam_y = (cy - self.intrinsics["ppy"]) * depth / self.intrinsics["fy"]
-        cam_z = depth
-
-        self.get_logger().info(
-            f"🎯 장식 cam 좌표 = ({cam_x:.1f}, {cam_y:.1f}, {cam_z:.1f})"
-        )
-
-        return cam_x, cam_y, cam_z
-
-
-    # ===============================
-    # 로봇 유틸리티
-    # ===============================
-    def grip(self):
-        from DSR_ROBOT2 import set_digital_output
-        self.get_logger().info("GRIP ON")
+    def grasp_topping(self, topping_pose):
+        """토핑 그리핑"""
+        from DSR_ROBOT2 import movel, movej, posx
+        from dsr_control2 import set_digital_output
+        
+        # 접근 위치 (토핑 위 50mm)
+        approach_pose = topping_pose.copy()
+        approach_pose[2] += 50
+        
+        self.get_logger().info("토핑 접근")
+        movel(posx(approach_pose), vel=50, acc=50)
+        
+        # 그리퍼 열기
+        set_digital_output(1, 0)  # 그리퍼 포트 확인 필요
+        rclpy.spin_once(self, timeout_sec=0.5)
+        
+        # 하강
+        self.get_logger().info("토핑 그립")
+        movel(posx(topping_pose), vel=30, acc=30)
+        
+        # 그리퍼 닫기
         set_digital_output(1, 1)
-        set_digital_output(2, 0)
-        time.sleep(0.3)
+        rclpy.spin_once(self, timeout_sec=1.0)
+        
+        # 상승
+        movel(posx(approach_pose), vel=50, acc=50)
 
-    def release(self):
-        from DSR_ROBOT2 import set_digital_output
-        self.get_logger().info("GRIP OFF")
+    def place_topping_on_drink(self):
+        """음료 위에 토핑 올리기"""
+        from DSR_ROBOT2 import movel, posx
+        from dsr_control2 import set_digital_output
+        
+        # 음료 위치로 이동
+        self.get_logger().info("음료 위치로 이동")
+        drink_pose = self.DRINK_STATION.copy()
+        drink_pose[2] += 100  # 음료 위 100mm
+        
+        movel(posx(drink_pose), vel=50, acc=50)
+        
+        # 토핑 올리기 위치로 하강
+        drink_pose[2] -= 50
+        movel(posx(drink_pose), vel=30, acc=30)
+        
+        # 그리퍼 열기
         set_digital_output(1, 0)
-        set_digital_output(2, 1)
-        time.sleep(0.3)
-
-    def transform_to_base(self, cam_pos):
-        from DSR_ROBOT2 import get_current_posx
+        rclpy.spin_once(self, timeout_sec=0.5)
         
-        cx, cy, cz = cam_pos
-        # 1. 카메라 좌표계 점 (Homogeneous)
-        p_cam = np.array([cx, cy, cz, 1.0])
+        # 상승
+        drink_pose[2] += 100
+        movel(posx(drink_pose), vel=50, acc=50)
+
+    def deliver_drink(self):
+        """손님에게 음료 배달"""
+        from DSR_ROBOT2 import movel, movej, posx
+        from dsr_control2 import set_digital_output
         
-        # 2. Gripper 좌표계로 변환 (Hand-Eye Calibration)
-        p_grp = self.gripper2cam @ p_cam
+        # 서비스로 손님 위치 받기
+        while not self.delivery_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info("배달 서비스 대기 중...")
         
-        # 3. Base 좌표계로 변환 (Robot Kinematics)
-        # 현재 로봇 위치 가져오기 (x, y, z, a, b, c) - Euler ZYZ
-        curr_pos = get_current_posx()[0]
-        x, y, z, a, b, c = curr_pos
+        request = DrinkDelivery.Request()
+        request.finish = True
+        future = self.delivery_client.call_async(request)
+        rclpy.spin_until_future_complete(self, future)
         
-        # 회전 행렬 생성 (Doosan은 ZYZ Euler angle 사용)
-        R = Rotation.from_euler('ZYZ', [a, b, c], degrees=True).as_matrix()
-        T_base_grp = np.eye(4)
-        T_base_grp[:3, :3] = R
-        T_base_grp[:3, 3] = [x, y, z]
+        response = future.result()
+        customer_pose = list(response.goal_position)
         
-        p_base = T_base_grp @ p_grp
-        return p_base[:3]
-
-    # ===============================
-    # 실행
-    # ===============================
-
-    def run(self):
-        self.get_logger().info("토핑 시작")
-
-        from DSR_ROBOT2 import movej, movel, posx, wait, DR_MV_MOD_REL, get_current_posx
-
-        SCAN=[0,0,90,0,90,0]
-        # 1. 스캔 위치로 이동
-        movej(SCAN, vel=VELJ, acc=ACCJ)
-        wait(1.0)
-
-        # 2. 장식 인식 (존재 여부 확인)
-        pos = self.find_topping_position()
-        if pos is None:
-            self.get_logger().error("❌ 장식 인식 실패 → 작업 종료")
+        if len(customer_pose) < 6:
+            self.get_logger().error("유효하지 않은 손님 위치")
             return
+        
+        self.get_logger().info(f"손님 위치: {customer_pose}")
+        
+        # 음료 그립
+        self.get_logger().info("음료 그립")
+        drink_grasp_pose = self.DRINK_STATION.copy()
+        drink_grasp_pose[2] -= 20  # 음료 높이에 맞게 조정
+        
+        movel(posx(drink_grasp_pose), vel=50, acc=50)
+        set_digital_output(1, 1)  # 그리퍼 닫기
+        rclpy.spin_once(self, timeout_sec=1.0)
+        
+        # 음료 들어올리기
+        drink_grasp_pose[2] += 100
+        movel(posx(drink_grasp_pose), vel=50, acc=50)
+        
+        # 손님 위치로 이동
+        self.get_logger().info("손님에게 배달")
+        movel(posx(customer_pose), vel=60, acc=60)
+        
+        # 음료 내려놓기
+        set_digital_output(1, 0)  # 그리퍼 열기
+        rclpy.spin_once(self, timeout_sec=0.5)
+        
+        # 홈으로 복귀
+        movej(self.HOME_POSITION, vel=60, acc=60)
+        
+        self.get_logger().info("배달 완료")
 
-        self.get_logger().info("✅ 인식 성공")
-
-        # 3. 좌표 변환 (Camera -> Base)
-        curr = get_current_posx()[0]
-        rx, ry, rz = curr[3], curr[4], curr[5]
-
-        bx, by, bz = self.transform_to_base(pos)
-        self.get_logger().info(f"🎯 변환된 타겟 좌표: {bx:.2f}, {by:.2f}, {bz:.2f}")
-
-        # 4. 접근
-        self.release()
-        movel(posx([bx, by, bz + 100, rx, ry, rz]), vel=[100, 100], acc=[100, 100])
-        wait(0.3)
-
-        # 5. 픽
-        movel(posx([bx, by, bz - 80, rx, ry, rz]), vel=[50, 50], acc=[50, 50])
-        wait(0.2)
-        self.grip()
-        wait(0.5)
-
-        # 6. 리프트
-        movel(posx([0, 0, 150, 0, 0, 0]),
-            vel=[100, 100], acc=[100, 100], mod=DR_MV_MOD_REL)
-        wait(0.5)
-
-        # 7. 홈 위치로 이동
-        self.get_logger().info("홈 위치로 이동")
-        movej(J_READY, vel=VELJ, acc=ACCJ)
-        wait(1.0)
-
-        # 8. 내려놓기 (홈 위치 기준)
-        self.get_logger().info("장식품 내려놓기")
-        movel(posx([0, 0, -80, 0, 0, 0]),
-            vel=[50, 50], acc=[50, 50], mod=DR_MV_MOD_REL)
-        wait(0.3)
-
-        self.release()
-        wait(0.5)
-
-        # 9. 복귀
-        movel(posx([0, 0, 80, 0, 0, 0]),
-            vel=[100, 100], acc=[100, 100], mod=DR_MV_MOD_REL)
-        wait(0.5)
-
-        self.get_logger().info("✅ 토핑 완료")
+    def execute_topping_task(self, recipe_topping):
+        """
+        전체 토핑 작업 실행
+        :param recipe_topping: 'white_duck', 'yellow_duck', 'leaf'
+        """
+        from DSR_ROBOT2 import movej
+        
+        try:
+            # 1. 홈 위치로
+            self.get_logger().info("홈 위치로 이동")
+            movej(self.HOME_POSITION, vel=60, acc=60)
+            
+            # 2. 토핑 스테이션으로 이동
+            self.get_logger().info("토핑 스테이션으로 이동")
+            movej(self.TOPPING_STATION, vel=60, acc=60)
+            rclpy.spin_once(self, timeout_sec=1.0)  # 카메라 안정화
+            
+            # 3. 토핑 감지
+            self.get_logger().info(f"{recipe_topping} 감지 시도")
+            detection = self.detect_topping(recipe_topping)
+            
+            if detection is None:
+                self.get_logger().error("토핑 감지 실패")
+                return False
+            
+            # 4. 좌표 변환
+            pixel_x, pixel_y, depth = detection
+            topping_pose = self.pixel_to_robot_coords(pixel_x, pixel_y, depth)
+            
+            if topping_pose is None:
+                self.get_logger().error("좌표 변환 실패")
+                return False
+            
+            self.get_logger().info(f"토핑 로봇 좌표: {topping_pose}")
+            
+            # 5. 토핑 그립
+            self.grasp_topping(topping_pose)
+            
+            # 6. 음료에 토핑 올리기
+            self.place_topping_on_drink()
+            
+            # 7. 음료 배달
+            self.deliver_drink()
+            
+            return True
+            
+        except Exception as e:
+            self.get_logger().error(f"작업 실패: {str(e)}")
+            return False
 
 
 def main():
@@ -288,12 +309,21 @@ def main():
     DR_init.__dsr__id = ROBOT_ID
     DR_init.__dsr__model = ROBOT_MODEL
 
-    node = Topping()
+    node = ToppingNode()
     DR_init.__dsr__node = node
 
     try:
-        node.run()
-        rclpy.spin(node)
+        # 레시피에 따른 토핑 선택 (파라미터나 서비스로 받을 수도 있음)
+        recipe_topping = 'white_duck'  # 예시
+        
+        # 토핑 작업 실행
+        success = node.execute_topping_task(recipe_topping)
+        
+        if success:
+            node.get_logger().info("모든 작업 완료!")
+        else:
+            node.get_logger().error("작업 실패")
+
     except KeyboardInterrupt:
         pass
     finally:

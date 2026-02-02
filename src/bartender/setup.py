@@ -34,6 +34,8 @@ setup(
         'query = bartender.db.query_node:main',
         'recovery = bartender.recovery.recovery_node:main',
         'stt = bartender.stt.stt_node:main',
+        'srv_test = bartender.topping.srv_test:main',
+        'topping_node = bartender.topping.topping_node:main',
         'supervisor = bartender.supervisor.supervisor_node:main',
         ],
 }   ,
