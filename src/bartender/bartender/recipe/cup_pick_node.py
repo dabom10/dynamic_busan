@@ -226,7 +226,7 @@ class BartenderBot(Node):
         pos = self.find_object(target_classes=obj_class) if obj_class else None
         if pos is not None:
             bx, by, bz = self.transform_to_base(pos)
-            self.get_logger().info(f"인식된 좌표: {bx:.1f}, {by:.1f}, {bz:.1f}")
+            self.get_logger().info(f".된 좌표: {bx:.1f}, {by:.1f}, {bz:.1f}")
         elif hardcoded_pos:
             bx, by, bz = hardcoded_pos[:3]
             self.get_logger().warn(f"인식 실패 → 하드코딩 좌표 사용: {bx},{by},{bz}")
