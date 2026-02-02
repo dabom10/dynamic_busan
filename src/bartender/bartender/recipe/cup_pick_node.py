@@ -152,7 +152,7 @@ class BartenderBot(Node):
             return None
 
         if target_classes is None:
-            target_classes = [41, 71, 39, 45]  # 컵, 병, 그릇
+            target_classes = [3, 4, 5, 6, 7, 8]  # black_cup, green_cup, yellow_cup, black_bottle, blue_bottle, purple_bottle
 
         candidates = [b for b in results[0].boxes if int(b.cls[0]) in target_classes]
         if not candidates:
