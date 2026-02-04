@@ -15,6 +15,7 @@ import os
 import json
 import time
 from bartender.onrobot import RG
+from bartender.recipe.depth_estimation import estimate_depth_from_window
 
 ROBOT_TCP = "GripperDA_v1"
 GRIPPER_NAME = "rg2"
@@ -107,7 +108,7 @@ class BartenderNode(Node):
         self.bottle_origin_pos = None 
         self.saved_vision_offset = [0.0, 0.0]
         self.saved_approach_dist = 0.0
-        
+
         self.status_msg = "Waiting..."
         self.is_moving = False
         
@@ -126,16 +127,16 @@ class BartenderNode(Node):
         # [추가] 병별 파라미터 (XY 보정, 접근 여유거리)
         # margin이 작을수록 병 쪽으로 더 많이 전진합니다.
         self.bottle_params = {
-            "black_bottle": {"off_x": 0.0, "off_y": 0.0, "margin": 175.0},
-            "blue_bottle":  {"off_x": 5.0, "off_y": 0.0, "margin": 175.0},
-            "default":      {"off_x": 0.0, "off_y": 0.0, "margin": 175.0}
+            "black_bottle": {"off_x": 0.0, "off_y": 0.0, "margin": 160.0},
+            "blue_bottle":  {"off_x": 5.0, "off_y": 0.0, "margin": 160.0},
+            "default":      {"off_x": 0.0, "off_y": 0.0, "margin": 160.0}
         }
 
         # ★ 컵 종류별 놓는 높이 (Z 절대 좌표)
         self.cup_place_target_z = {
-            "green_cup": 150.0,
-            "black_cup": 85.0,
-            "yellow_cup": 55.0
+            "green_cup": 145.0,
+            "black_cup": 80.0,
+            "yellow_cup": 50.0
         }
 
         self.set_robot_tcp()
@@ -143,6 +144,15 @@ class BartenderNode(Node):
         self.input_thread = threading.Thread(target=self.user_input_loop, daemon=True)
         self.input_thread.start()
         self.timer = self.create_timer(0.033, self.timer_callback)
+
+    def abort_task(self, reason: str):
+        """Stop current task safely and prevent vision loop from triggering motion."""
+        self.get_logger().error(f"❌ 작업 중단: {reason}")
+        self.status_msg = f"ERROR: {reason}"
+        self.is_moving = False
+        self.task_step = "idle"
+        self.target_object = None
+        self.vision_align_iter = 0
 
     def set_robot_tcp(self):
         if self.set_tool_client.wait_for_service(timeout_sec=1.0):
@@ -178,6 +188,7 @@ class BartenderNode(Node):
                         self.status_msg = "Moving to Start Pos..."
                         self.is_moving = True 
                         gripper.open_gripper()
+                        time.sleep(1.0) # [수정] 그리퍼 동작 안정화 대기 시간 증가
                         self.get_logger().info(f"주문 접수: {r['display_name']}")
                         self.move_to_initial_ready()
                         found = True
@@ -186,20 +197,49 @@ class BartenderNode(Node):
             except: break
 
     def move_to_initial_ready(self):
-        req = MoveLine.Request()
-        req.pos = self.INITIAL_READY_POS
-        req.vel = [100.0, 0.0]; req.acc = [100.0, 0.0]
-        req.ref = 0; req.mode = 0 
-        future = self.move_line_client.call_async(req)
-        future.add_done_callback(self.ready_to_search_cup)
+        # [수정] 초기 이동 시 안전을 위해 Joint Home 경유
+        self.get_logger().info("초기 위치 이동: Joint Home -> Ready Pos")
+        if not self.move_joint_client.wait_for_service(timeout_sec=1.0):
+            self.abort_task("move_joint 서비스 미연결")
+            return
+        req = MoveJoint.Request()
+        req.pos = self.JOINT_HOME_POS
+        req.vel = 60.0; req.acc = 40.0
+        # [수정] sync_type=0 제거 (기본값 사용). MoveJoint 거부 방지.
+        future = self.move_joint_client.call_async(req)
+        future.add_done_callback(self.move_to_ready_linear)
+
+    def move_to_ready_linear(self, future):
+        try:
+            res = future.result()
+        except Exception as e:
+            self.abort_task(f"Joint Home 호출 실패: {e}")
+            return
+
+        if getattr(res, "success", False):
+            req = MoveLine.Request()
+            req.pos = self.INITIAL_READY_POS
+            req.vel = [100.0, 0.0]; req.acc = [100.0, 0.0]
+            req.ref = 0; req.mode = 0 
+            req.sync_type = 0
+            future = self.move_line_client.call_async(req)
+            future.add_done_callback(self.ready_to_search_cup)
+        else:
+            self.abort_task(f"Joint Home 이동 실패: {res}")
 
     def ready_to_search_cup(self, future):
-        if future.result().success:
+        try:
+            res = future.result()
+        except Exception as e:
+            self.abort_task(f"Ready 위치 이동 실패: {e}")
+            return
+
+        if getattr(res, "success", False):
             self.get_logger().info("초기 위치 도착. 탐색 시작.")
             self.status_msg = f"Search: {self.target_object}"
             self.is_moving = False
         else:
-            self.is_moving = False
+            self.abort_task(f"Ready 위치 이동 실패: {res}")
 
     def timer_callback(self):
         annotated_frame = None
@@ -248,21 +288,24 @@ class BartenderNode(Node):
                             cx = (x1 + x2) // 2
                             cy = (y1 + y2) // 2 
                         
-                        # 거리 측정
-                        w, h = x2 - x1, y2 - y1
-                        roi_x1 = max(0, int(x1 + w * 0.3)); roi_x2 = min(640, int(x2 - w * 0.3))
-                        roi_y1 = max(0, int(y1 + h * 0.3)); roi_y2 = min(480, int(y2 - h * 0.3))
-                        
-                        # ROI 범위 예외처리
-                        if roi_x1 >= roi_x2 or roi_y1 >= roi_y2:
-                            continue
-
-                        crop = depth_image[roi_y1:roi_y2, roi_x1:roi_x2]
-                        valid = crop[(crop > 100) & (crop < 1200)]
-                        
-                        dist = 0.0
-                        if len(valid) > 0:
-                            dist = np.median(valid) * self.depth_scale
+                        # 거리 측정 (통계 기반 depth 보정)
+                        # 튜닝 포인트:
+                        # - window_radius: 3~7 픽셀 권장
+                        # - std_threshold: 0.02~0.05m 권장 (센서/환경 따라 조정)
+                        dist, depth_stats = estimate_depth_from_window(
+                            depth_image,
+                            center_xy=(cx, cy),
+                            window_radius=5,
+                            std_threshold=0.03,
+                            k=1.0,
+                            min_inliers=8,
+                            depth_scale=self.depth_scale,  # z16 raw -> meters
+                            min_depth=0.1,
+                            max_depth=1.2,
+                            reducer="median",
+                            fallback_reducer="median",
+                            prefer_near_cluster=True,
+                        )
 
                         if dist > 0:
                             cv2.putText(annotated_frame, f"Dist: {dist:.3f}m", (x1, y1-20), 
@@ -271,6 +314,17 @@ class BartenderNode(Node):
 
                         # 인식 범위 내 들어오면 이동 시작
                         if 0.1 < dist < 1.2:
+                            try:
+                                self.get_logger().info(
+                                    "📏 Depth stats: "
+                                    f"mean={float(depth_stats['mean']):.3f}m, "
+                                    f"std={float(depth_stats['std']):.3f}m, "
+                                    f"samples={int(depth_stats['num_samples'])}, "
+                                    f"inliers={int(depth_stats['num_inliers'])}"
+                                )
+                            except Exception:
+                                pass
+
                             cam_point = rs.rs2_deproject_pixel_to_point(intrinsics, [cx, cy], dist)
                             c_x = cam_point[0] * 1000.0
                             c_y = cam_point[1] * 1000.0
@@ -278,6 +332,10 @@ class BartenderNode(Node):
                             
                             gripper_pos = np.dot(self.calib_matrix, np.array([c_x, c_y, c_z, 1.0]))
                             gx, gy, gz = gripper_pos[0], gripper_pos[1], gripper_pos[2]
+                            self.get_logger().info(
+                                f"🎯 Vision(mm): cx,cy=({cx},{cy}) cam=[{c_x:.1f},{c_y:.1f},{c_z:.1f}] -> "
+                                f"tool=[{gx:.1f},{gy:.1f},{gz:.1f}]"
+                            )
                             
                             self.execute_eye_in_hand_move(gx, gy, gz)
                             break 
@@ -314,8 +372,7 @@ class BartenderNode(Node):
         # 병별 파라미터 로드
         params = self.bottle_params.get(self.target_object, self.bottle_params["default"])
         
-        # [수정] 병 작업 시 높이(Z) 유지 (Base Z=360)
-        # Tool 좌표계 기준 Y축 이동이 높이 변화를 유발한다고 가정하고 0으로 고정
+        # [test_bottle.py 로직] 병 작업 시 높이(Z) 유지 (Base Z=360)
         if self.task_step == "bottle":
             self.get_logger().info(f"🍾 병 정렬: 높이 유지(Z=360)를 위해 Y축 이동 제거. 원본 Y={offset_y:.1f}")
             offset_y = 0.0
@@ -334,44 +391,53 @@ class BartenderNode(Node):
         req = MoveLine.Request()
         req.pos = [float(offset_x), float(offset_y), 0.0, 0.0, 0.0, 0.0] 
         req.vel = [100.0, 0.0]; req.acc = [100.0, 0.0]
-        req.ref = 1; req.mode = 1 
-        
+        req.ref = 1; req.mode = 1
+        req.sync_type = 0 # [수정] 동기 모드 명시 (이동 완료 후 콜백 실행)
+
         future = self.move_line_client.call_async(req)
         
         # [2] 하강 (Base 기준 절대 높이 차이 계산)
         if self.task_step == "cup":
-            # 컵 잡는 높이는 보통 낮으므로(예: 85), 현재 높이에서 차이 계산
-            target_pick_z = 85.0 # 잡을 때 Z (임시)
-            descend_dist = target_pick_z - self.CURRENT_Z_HEIGHT 
+            target_pick_z = float(self.cup_place_target_z.get(self.target_object, 85.0))
+            descend_dist = target_pick_z - float(self.CURRENT_Z_HEIGHT)
             self.get_logger().info(f"🍺 컵 하강 준비 (Diff: {descend_dist:.1f})")
             future.add_done_callback(lambda f: self.descend_vertical(f, descend_dist))
         elif self.task_step == "bottle":
-            self.get_logger().info(f"🍾 병 접근 준비 (XY 정렬 후 전진)")
+            self.get_logger().info("🍾 병 접근 준비 (XY 정렬 후 전진)")
             future.add_done_callback(self.approach_bottle)
 
-    def descend_vertical(self, future, z_diff):
-        if future.result().success:
-            self.status_msg = "Descending..."
-            
-            # Base 기준(ref=0) Relative(mode=1) 이동 -> Z축 수직 하강
-            req = MoveLine.Request()
-            req.pos = [0.0, 0.0, float(z_diff), 0.0, 0.0, 0.0]
-            req.vel = [50.0, 0.0]; req.acc = [50.0, 0.0]
-            req.ref = 0; req.mode = 1 
-            
-            f = self.move_line_client.call_async(req)
-            if self.task_step == "bottle":
-                f.add_done_callback(self.approach_bottle)
-            else:
-                f.add_done_callback(self.after_approach)
-            f.add_done_callback(self.after_approach)
+    def descend_vertical(self, future=None, z_diff: float = 0.0):
+        # [test_bottle.py 로직] future 결과 확인
+        if future is not None:
+            try:
+                if not future.result().success:
+                    self.get_logger().warn("⚠️ XY 정렬 실패 (MoveLine Error)")
+                    self.reset_state()
+                    return
+            except Exception as e:
+                self.get_logger().warn(f"⚠️ XY 정렬 결과 확인 실패: {e}")
+                self.reset_state()
+                return
+
+        self.status_msg = "Descending..."
+        self.get_logger().info(f"⬇️ 하강 시작: Base Z {float(z_diff):.1f}mm (relative)")
+        
+        # Base 기준(ref=0) Relative(mode=1) 이동 -> Z축 수직 하강
+        req = MoveLine.Request()
+        req.pos = [0.0, 0.0, float(z_diff), 0.0, 0.0, 0.0]
+        req.vel = [50.0, 0.0]; req.acc = [50.0, 0.0]
+        req.ref = 0; req.mode = 1 
+        req.sync_type = 0 # [수정] 동기 모드 명시
+        
+        f = self.move_line_client.call_async(req)
+        if self.task_step == "bottle":
+            f.add_done_callback(self.approach_bottle)
         else:
-            self.get_logger().warn("XY 정렬 실패")
-            self.reset_state()
+            f.add_done_callback(self.after_approach)
 
     def approach_bottle(self, future=None):
         if future is None or (hasattr(future, 'result') and future.result().success):
-            self.status_msg = "Approaching Bottle..."
+            self.status_msg = "Descending..."
             
             if not hasattr(self, 'bottle_approach_dist') or self.bottle_approach_dist is None:
                 self.get_logger().error("⚠️ 접근 거리 정보 없음. 병 접근 실패.")
@@ -392,6 +458,7 @@ class BartenderNode(Node):
             req.pos = [0.0, 0.0, float(dist), 0.0, 0.0, 0.0] # Tool Z축 전진
             req.vel = [50.0, 0.0]; req.acc = [50.0, 0.0]
             req.ref = 1; req.mode = 1 
+            req.sync_type = 0 # [수정] 동기 모드 명시
             
             f = self.move_line_client.call_async(req)
             f.add_done_callback(self.after_approach)
@@ -404,16 +471,32 @@ class BartenderNode(Node):
             gripper.close_gripper()
             time.sleep(1.0) # [추가] 그립 안정화 시간
             
-            # [수정] 후진(retract) 제거하고 바로 상승
-            self.lift_object()
+            # [수정] 병일 경우 현재 위치(Pick 좌표)를 저장한 뒤 상승
+            if self.task_step == "bottle":
+                self.get_current_pose_and_lift()
+            else:
+                self.lift_object()
         else:
             self.get_logger().warn("❌ 접근(Approach) 실패 - 이동 불가")
             self.reset_state()
 
+    def get_current_pose_and_lift(self):
+        """병을 잡은 위치를 저장하고 상승합니다."""
+        self.bottle_origin_pos = None # 초기화
+        if not self.get_pos_client.wait_for_service(timeout_sec=3.0):
+            self.get_logger().warn("⚠️ Pose 저장 실패(서비스 미연결). 기존 로직대로 상승합니다.")
+            self.lift_object()
+            return
+
+        req = GetCurrentPos.Request()
+        req.space_type = 1 # Task Space
+        future = self.get_pos_client.call_async(req)
+        future.add_done_callback(self.save_bottle_pos_and_lift)
+
     def retract_then_lift_bottle(self, retract_mm: float = 60.0):
         """병 파지 직후, 툴 기준으로 살짝 후진한 뒤 안전 높이로 올립니다."""
         self.status_msg = "Retracting..."
-        self.get_logger().info(f"🍾 파지 후 후진: Tool Z -{retract_mm:.1f}mm (거치대 이탈)")
+        self.get_logger().info(f"🍾 파지 후 상승: Tool Z -{retract_mm:.1f}mm")
 
         req = MoveLine.Request()
         req.pos = [0.0, 0.0, -float(retract_mm), 0.0, 0.0, 0.0]
@@ -423,43 +506,94 @@ class BartenderNode(Node):
         f.add_done_callback(self._after_bottle_retract)
 
     def _after_bottle_retract(self, future):
+        # [수정] 1차로 Base 절대 Z=580까지 상승을 시도하되,
+        # 작업영역/관절 제한 등으로 실패(또는 무시)될 수 있으므로 실패 시 Z=420으로 fallback 합니다.
+        primary_z = 580.0
+        fallback_z = 420.0
+        self.lift_bottle_to_safe_z(
+            primary_z,
+            next_cb=lambda lift_fut: self._after_bottle_lift_attempt(lift_fut, primary_z, fallback_z),
+        )
+
+    def _after_bottle_lift_attempt(self, future, primary_z: float, fallback_z: float):
+        """병 상승(primary_z) 시도 후, 결과를 확인하고 필요 시 fallback_z로 재시도합니다."""
         try:
             ok = future.result().success
         except Exception as e:
-            self.get_logger().warn(f"⚠️ 파지 후 후진 결과 확인 실패. 상승을 계속 시도합니다. err={e}")
+            self.get_logger().warn(f"⚠️ 병 상승 결과 확인 실패(Z={primary_z:.1f}). fallback 시도. err={e}")
             ok = False
 
         if not ok:
-            self.get_logger().warn("⚠️ 파지 후 후진 실패. 그래도 상승을 시도합니다.")
+            self.get_logger().warn(f"⚠️ 병 상승 실패(Z={primary_z:.1f}). fallback Z={fallback_z:.1f} 시도")
+            self.lift_bottle_to_safe_z(fallback_z, next_cb=self.move_to_joint_home_before_pour)
+            return
 
-        self.lift_object()
+        # success가 true라도 실제 이동이 충분하지 않을 수 있어 pose를 한 번 더 확인합니다.
+        if not self.get_pos_client.wait_for_service(timeout_sec=0.2):
+            self.get_logger().warn("⚠️ get_current_pose 미연결. 검증 없이 Joint Home으로 진행합니다.")
+            self.move_to_joint_home_before_pour(future)
+            return
+
+        req = GetCurrentPos.Request()
+        req.space_type = 1  # ROBOT_SPACE_TASK
+        f = self.get_pos_client.call_async(req)
+        f.add_done_callback(lambda pfut: self._verify_bottle_lift(pfut, primary_z, fallback_z, future))
+
+    def _verify_bottle_lift(self, pose_future, primary_z: float, fallback_z: float, lift_future):
+        """primary lift 후 현재 Z를 확인하고, 부족하면 fallback lift를 시도합니다."""
+        try:
+            res = pose_future.result()
+        except Exception as e:
+            self.get_logger().warn(f"⚠️ 병 상승 검증용 pose 조회 실패. Joint Home으로 진행합니다. err={e}")
+            self.move_to_joint_home_before_pour(lift_future)
+            return
+
+        if not getattr(res, "success", False):
+            self.get_logger().warn("⚠️ 병 상승 검증용 pose 조회 실패(success=false). Joint Home으로 진행합니다.")
+            self.move_to_joint_home_before_pour(lift_future)
+            return
+
+        current_z = float(res.pos[2])
+        # 목표보다 너무 낮으면(>30mm 차이) fallback 수행
+        if current_z < (primary_z - 30.0):
+            self.get_logger().warn(
+                f"⚠️ 병 상승 검증 실패: 현재 Z={current_z:.1f} < {primary_z - 30.0:.1f}. "
+                f"fallback Z={fallback_z:.1f}로 재상승 후 진행합니다."
+            )
+            self.lift_bottle_to_safe_z(fallback_z, next_cb=self.move_to_joint_home_before_pour)
+            return
+
+        self.get_logger().info(f"✅ 병 상승 검증 OK: 현재 Z={current_z:.1f} (목표 {primary_z:.1f})")
+        self.move_to_joint_home_before_pour(lift_future)
 
     def save_bottle_pos_and_lift(self, future):
         try:
             res = future.result()
-            self.bottle_origin_pos = res.pos 
-            self.get_logger().info(f"병 위치 저장: {self.bottle_origin_pos}")
-        except Exception: pass
+            if res.success:
+                self.bottle_origin_pos = res.pos 
+                self.get_logger().info(f"💾 병 Pick 위치 저장: X={res.pos[0]:.1f}, Y={res.pos[1]:.1f}, Z={res.pos[2]:.1f}")
+            else:
+                self.get_logger().warn("⚠️ Pose 저장 실패(Result Fail).")
+        except Exception as e: self.get_logger().warn(f"⚠️ Pose 저장 에러: {e}")
         self.lift_object()
 
     def lift_object(self):
         self.status_msg = "Lifting..."
 
-        # NOTE:
-        # 기존 코드는 Base Relative 로 Z +580mm를 올렸는데,
-        # 병 위치(특히 2번째 병)가 멀어질 때는 이 큰 상승량이 관절/작업영역 한계로 실패할 수 있습니다.
-        # 따라서 병 작업에서는 "Z=580(절대 높이)"로 올리도록 현재 pose를 읽어 dZ를 계산합니다.
+        # [수정] test_bottle.py와 동일하게 병 작업 시 바로 절대 높이 상승 시도
         if self.task_step == "bottle":
-            # [수정] 홈 경유를 위해 콜백 변경
-            self.lift_bottle_to_safe_z(580.0, next_cb=self.move_to_joint_home_before_pour)
+            # [수정] get_current_pose 서비스 호출 지연 방지를 위해 고정 높이(220mm) 상대 상승
+            self.get_logger().info("🍾 병 상승: 서비스 호출 없이 바로 상대 상승 (+220mm)")
+            self._lift_relative_z(220.0, next_cb=self.move_to_joint_home_before_pour)
             return
 
+        # 컵 작업 시 (Base Relative)
         req = MoveLine.Request()
-        req.pos = [0.0, 0.0, 580.0, 0.0, 0.0, 0.0]
+        req.pos = [0.0, 0.0, 200.0, 0.0, 0.0, 0.0] # 컵은 너무 높지 않게 200mm만 상승
         req.vel = [100.0, 0.0]; req.acc = [100.0, 0.0]
         req.ref = 0; req.mode = 1 # Base Relative
 
-        self.get_logger().info("🚀 상승: Base Z +580.0mm")
+        self.get_logger().info("🚀 컵 상승: Base Z +200.0mm")
 
         future = self.move_line_client.call_async(req)
         if self.task_step == "cup":
@@ -501,29 +635,48 @@ class BartenderNode(Node):
             self._lift_relative_z(fallback_dz, next_cb=next_cb)
             return
 
+        current_x = float(res.pos[0])
+        current_y = float(res.pos[1])
         current_z = float(res.pos[2])
+        current_rx = float(res.pos[3])
+        current_ry = float(res.pos[4])
+        current_rz = float(res.pos[5])
         dz = safe_z - current_z
         if dz < 0.0:
             # 이미 safe_z보다 높은 경우에는 더 올릴 필요가 없으니 0으로 클램프
             dz = 0.0
 
         self.get_logger().info(
-            f"🚀 병 상승: 현재 Z={current_z:.1f} -> 목표 Z={safe_z:.1f} (dZ={dz:.1f}mm)"
+            f"🚀 병 상승: 현재[X,Y,Z]=[{current_x:.1f},{current_y:.1f},{current_z:.1f}] "
+            f"R=[{current_rx:.1f},{current_ry:.1f},{current_rz:.1f}] -> 목표 Z={safe_z:.1f} (dZ={dz:.1f}mm)"
         )
         self._lift_relative_z(dz, next_cb=next_cb)
 
     def _lift_relative_z(self, dz: float, next_cb=None):
         """Base 기준 상대 Z 이동(dz) 후 next_cb로 체인을 이어갑니다."""
+        time.sleep(0.5) # [추가] 연속 명령 시 동작 씹힘 방지를 위한 대기
         self.get_logger().info(f"🚀 상승 명령: Base Z +{float(dz):.1f}mm")
         req = MoveLine.Request()
         req.pos = [0.0, 0.0, float(dz), 0.0, 0.0, 0.0]
         req.vel = [100.0, 0.0]; req.acc = [100.0, 0.0]
+        req.time = 2.0 # [추가] 속도 대신 시간을 지정하여 동작 생략 방지 (2초 동안 이동)
         req.ref = 0; req.mode = 1  # Base Relative
 
         f = self.move_line_client.call_async(req)
         f.add_done_callback(lambda fut: self._log_move_result(fut, "Lift(Base Z)"))
         if next_cb is not None:
-            f.add_done_callback(next_cb)
+            # [수정] 서비스가 즉시 리턴되더라도 물리적인 시간(2.0초)을 보장하기 위해 Timer 사용
+            f.add_done_callback(lambda fut: self._wait_and_execute(fut, 2.0, next_cb))
+
+    def _wait_and_execute(self, future, wait_time, next_cb):
+        """서비스 응답 후 wait_time만큼 대기했다가 next_cb를 실행합니다."""
+        try:
+            # 성공 여부와 관계없이(혹은 성공 시에만) 시간 지연 후 다음 동작
+            # future 결과를 next_cb에 전달하기 위해 args 사용
+            threading.Timer(wait_time + 0.1, next_cb, args=[future]).start()
+        except Exception as e:
+            self.get_logger().error(f"Timer Error: {e}")
+            next_cb(future)
 
     def _log_move_result(self, future, label: str):
         try:
@@ -595,7 +748,7 @@ class BartenderNode(Node):
     def finish_cup_task(self, future):
         if future.result().success:
             self.get_logger().info("✅ 컵 배치 완료. 그리퍼 해제")
-            gripper.close_gripper()
+            gripper.open_gripper()
             
             # 안전하게 위로 빠져나오기 (Base 기준 +Z 100mm 상승)
             self.status_msg = "Retracting..."
@@ -655,6 +808,8 @@ class BartenderNode(Node):
                 bottle_name = liquors[self.liquor_idx]['name']
                 self.target_object = bottle_name
                 self.task_step = "bottle"
+                self.saved_vision_offset = [0.0, 0.0]
+                self.saved_approach_dist = 0.0
                 self.status_msg = f"Search: {bottle_name}"
                 self.is_moving = False
                 self.get_logger().info(f"🍾 병 찾기: {bottle_name}")
@@ -680,10 +835,29 @@ class BartenderNode(Node):
     def go_to_pour_position(self, future):
         if future.result().success:
             self.status_msg = "Moving to Pour..."
-            # [수정] 사용자 제공 붓기 초기 좌표 (수평 상태)
-            self.pour_start_pos = [400.55, -41.65, 146.83, 33.90, -174.78, 29.70]
-            self.get_logger().info(f"🍷 붓기 위치로 이동 시작 (1. 상공 이동)")
+            # [수정] 컵 종류별 Base Z에 맞춰 붓기 Z만 보정합니다.
+            # 기준값(test_bottle.py): black_cup(Z=85)일 때
+            #   - pour_start Z=146.83  -> offset = +61.83
+            #   - pour_end   Z=168.70  -> offset = +83.70
+            # 추가 요구사항: 기존보다 약 +50mm 높은 위치에서 붓기
+            cup_name = "black_cup"
+            if self.current_recipe:
+                cup_name = self.current_recipe.get("cup", "black_cup")
+            cup_z = float(self.cup_place_target_z.get(cup_name, 85.0))
 
+            base_ref_cup_z = 85.0
+            pour_extra_z = 50.0
+            pour_start_z = cup_z + (146.83 - base_ref_cup_z) + pour_extra_z
+            pour_end_z = cup_z + (168.70 - base_ref_cup_z) + pour_extra_z
+
+            self.pour_start_pos = [400.55, -41.65, float(pour_start_z), 33.90, -174.78, 29.70]
+            self.pour_end_pos = [429.46, -18.07, float(pour_end_z), 112.55, -140.10, 67.13]
+
+            self.get_logger().info(
+                f"🍷 붓기 Z 보정: Cup({cup_name}) Z={cup_z:.1f} -> Start Z={pour_start_z:.2f}, End Z={pour_end_z:.2f}"
+            )
+            self.get_logger().info("🍷 붓기 위치로 이동 시작 (1. 상공 이동)")
+            
             # [수정] 안전한 이동을 위해: 상공(Z=580)으로 먼저 수평 이동 후 하강
             high_pour_pos = list(self.pour_start_pos)
             high_pour_pos[2] = 580.0 # 병을 들어올린 높이 유지
@@ -720,16 +894,16 @@ class BartenderNode(Node):
             except (IndexError, KeyError, TypeError, ValueError):
                 pour_time = 2.0
 
-            # [수정] 사용자 제공 완전히 붓는 좌표 (수직 상태)
-            pour_end_pos = [429.46, -18.07, 168.70, 112.55, -140.10, 67.13]
-            
+            # [수정] cup에 맞게 보정된 end pose 사용 (fallback은 test_bottle.py 기준값)
+            pour_end_pos = getattr(self, "pour_end_pos", [429.46, -18.07, 168.70, 112.55, -140.10, 67.13])
             req = MoveLine.Request()
             req.pos = pour_end_pos
             req.vel = [60.0, 0.0]; req.acc = [60.0, 0.0]
             req.time = pour_time # [수정] pour_time 동안 이동
             req.ref = 0; req.mode = 0 
             f = self.move_line_client.call_async(req)
-            f.add_done_callback(self.wait_and_return)
+            # [수정] 붓는 시간(pour_time)만큼 확실히 대기 후 복귀
+            f.add_done_callback(lambda fut: self._wait_and_execute(fut, pour_time, self.wait_and_return))
         else: self.reset_state()
 
     def wait_and_return(self, future):
@@ -752,30 +926,38 @@ class BartenderNode(Node):
         if future.result().success:
             self.status_msg = "Returning Bottle..."
             self.get_logger().info("🍾 병 원래 위치로 복귀 시작 (1. 수직 상승)")
-            
-            # [수정] 먼저 수직으로 상승하여 안전 높이 확보 (Base Relative Z+350)
-            req = MoveLine.Request()
-            req.pos = [0.0, 0.0, 350.0, 0.0, 0.0, 0.0]
-            req.vel = [100.0, 0.0]; req.acc = [100.0, 0.0]
-            req.ref = 0; req.mode = 1 # Relative
-            
-            f = self.move_line_client.call_async(req)
-            f.add_done_callback(self.move_to_bottle_origin_high)
+
+            # [수정] pour Z가 cup마다 달라지므로(+50mm 포함),
+            # 상대 +350mm 대신 Base 절대 Z=580까지 올려 상공을 보장합니다.
+            self.lift_bottle_to_safe_z(580.0, next_cb=self.move_to_bottle_origin_high)
         else: self.reset_state()
 
     def move_to_bottle_origin_high(self, future):
         if future.result().success:
             self.get_logger().info("🍾 상공으로 이동 (2. 수평 이동)")
-            # BOTTLE_VIEW_POS 상공 (Z=580)으로 이동
-            high_pos = list(self.BOTTLE_VIEW_POS)
+            
+            # [수정] 저장된 Pick 위치가 있으면 그 좌표 사용, 없으면 기본 View Pos 사용
+            if self.bottle_origin_pos is not None:
+                high_pos = list(self.bottle_origin_pos)
+                self.get_logger().info(f"📍 저장된 병 좌표 사용: X={high_pos[0]:.1f}, Y={high_pos[1]:.1f}")
+            else:
+                high_pos = list(self.BOTTLE_VIEW_POS)
+            
+            # Z는 안전 높이 580 고정
             high_pos[2] = 580.0
             
             req = MoveLine.Request()
             req.pos = [float(x) for x in high_pos]
             req.vel = [100.0, 0.0]; req.acc = [100.0, 0.0]
             req.ref = 0; req.mode = 0
+            req.sync_type = 0 # [추가] 동기 모드(0)로 설정하여 이동 완료 대기 시도
             f = self.move_line_client.call_async(req)
-            f.add_done_callback(self.place_bottle_align_high)
+            
+            # [수정] 이미 정확한 X,Y로 이동했으므로 align/approach 단계 건너뛰고 바로 하강
+            if self.bottle_origin_pos is not None:
+                f.add_done_callback(self.descend_to_place_bottle)
+            else:
+                f.add_done_callback(self.place_bottle_align_high)
         else: self.reset_state()
 
     def place_bottle_align_high(self, future):
@@ -806,12 +988,23 @@ class BartenderNode(Node):
 
     def descend_to_place_bottle(self, future):
         if future.result().success:
-            # 5. 수직 하강 (Z=580 -> 360)
-            self.get_logger().info("🍾 수직 하강 (Z=580 -> 360)")
-            req = MoveLine.Request()
-            req.pos = [0.0, 0.0, -220.0, 0.0, 0.0, 0.0] # Base Relative Z down
-            req.vel = [50.0, 0.0]; req.acc = [50.0, 0.0]
-            req.ref = 0; req.mode = 1 # Relative
+            # [수정] 저장된 Pick 높이(Z)로 정확히 하강
+            if self.bottle_origin_pos is not None:
+                target_z = self.bottle_origin_pos[2]
+                self.get_logger().info(f"🍾 수직 하강 (Pick 높이 Z={target_z:.1f}로 복귀)")
+                # X,Y,R,P,Y는 현재 유지, Z만 변경 (Absolute)
+                target_pos = list(self.bottle_origin_pos)
+                req = MoveLine.Request()
+                req.pos = [float(x) for x in target_pos]
+                req.vel = [50.0, 0.0]; req.acc = [50.0, 0.0]
+                req.ref = 0; req.mode = 0 # Absolute
+            else:
+                self.get_logger().info("🍾 수직 하강 (Z=580 -> 360)")
+                req = MoveLine.Request()
+                req.pos = [0.0, 0.0, -220.0, 0.0, 0.0, 0.0] # Base Relative Z down
+                req.vel = [50.0, 0.0]; req.acc = [50.0, 0.0]
+                req.ref = 0; req.mode = 1 # Relative
+            
             f = self.move_line_client.call_async(req)
             f.add_done_callback(self.release_bottle)
         else: self.reset_state()
