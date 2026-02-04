@@ -438,7 +438,6 @@ class PersonTrackingNode(Node):
         self.pub_count = self.create_publisher(Int32, '/person_count', 10)
         self.pub_zone_status = self.create_publisher(Int32MultiArray, '/zone_status', 10)
         self.pub_active_zone = self.create_publisher(Int32, '/active_zone', 10)
-        # self.pub_zone_robot_pos = self.create_publisher(Float32MultiArray, '/zone_robot_pos', 10) # 서비스로 변경
         self.pub_disappeared_name = self.create_publisher(String, '/disappeared_customer_name', 10)
 
         # ---------------------------------------------------------------------

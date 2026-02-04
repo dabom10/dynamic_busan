@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 """
-Supervisor Node - STT + 모션 시퀀스 통합
-Wakeup 감지 → STT → DB 저장 → 모션 시퀀스 실행
+Supervisor Node - STT + 모션 시퀀스 통합 (Topping 없는 버전)
+
+흐름: Wakeup 감지 → STT → DB 저장 → tracking에 고객 이름 전달 → 모션 시퀀스 실행
+시퀀스: recipe → shake
+
+연동 토픽:
+  - /customer_name (pub): tracking_node에 고객 이름 전달
+  - /manufacturing_done (pub): recovery_node에 제작 완료 신호
+
 """
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 from pathlib import Path
+from std_msgs.msg import String
 
 from bartender_interfaces.action import Motion
 from bartender.db.db_client import DBClient
@@ -56,6 +64,10 @@ class SupervisorNode(Node):
 
         # DB Client
         self.db_client = DBClient(self)
+
+        # Publishers (tracking, recovery 연동)
+        self.pub_customer_name = self.create_publisher(String, '/customer_name', 10)
+        self.pub_manufacturing_done = self.create_publisher(String, '/manufacturing_done', 10)
 
         # OpenAI
         self.openai_client = OpenAI(api_key=api_key)
@@ -126,6 +138,12 @@ class SupervisorNode(Node):
             self.save_to_database(name, menu)
             self.current_customer = name
             self.get_logger().info(f"=== Order: {name} ===")
+
+            # tracking_node에 고객 이름 전달
+            name_msg = String()
+            name_msg.data = name
+            self.pub_customer_name.publish(name_msg)
+            self.get_logger().info(f"[PUB] /customer_name: {name}")
             #sd.wait()
             self.start_sequence()
 
@@ -160,6 +178,13 @@ class SupervisorNode(Node):
         """다음 모션 실행"""
         if self.current_index >= len(self.motion_sequence):
             self.get_logger().info(f"=== Completed for {self.current_customer}! ===")
+
+            # recovery_node에 제작 완료 신호 전달
+            done_msg = String()
+            done_msg.data = self.current_customer if self.current_customer else ""
+            self.pub_manufacturing_done.publish(done_msg)
+            self.get_logger().info(f"[PUB] /manufacturing_done: {done_msg.data}")
+
             self.reset_state()
             return
 
