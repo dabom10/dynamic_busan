@@ -4,7 +4,11 @@
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
+from std_msgs.msg import String
 from cv_bridge import CvBridge
+from rclpy.action import ActionServer
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 import cv2
 import numpy as np
 import pyrealsense2 as rs
@@ -12,10 +16,12 @@ from ultralytics import YOLO
 import threading
 import sys
 import os
-import json
+# import json
 import time
 from bartender.onrobot import RG
 from bartender.recipe.depth_estimation import estimate_depth_from_window
+from bartender.db.db_client import DBClient
+from bartender_interfaces.action import Motion
 
 ROBOT_TCP = "GripperDA_v1"
 GRIPPER_NAME = "rg2"
@@ -54,12 +60,17 @@ class BartenderNode(Node):
         model_path = os.path.join(current_dir, 'best.pt')
         calib_path = os.path.join(current_dir, 'T_gripper2camera.npy')
 
-        # 2. 데이터 로드
-        if os.path.exists(json_path):
-            with open(json_path, 'r', encoding='utf-8') as f:
-                self.recipe_data = json.load(f)
-        else:
-            self.get_logger().error("recipe.json 없음"); sys.exit(1)
+        # 2. 데이터 로드 (JSON 대신 DB 사용 예정이므로 주석 처리하거나 fallback으로 유지)
+        # if os.path.exists(json_path):
+        #     with open(json_path, 'r', encoding='utf-8') as f:
+        #         self.recipe_data = json.load(f)
+        # else:
+        #     self.get_logger().error("recipe.json 없음"); sys.exit(1)
+        
+        # DB 클라이언트 초기화
+        self.db_client = DBClient(self)
+        self.db_query_event = threading.Event()
+        self.db_query_result = []
 
         self.calib_matrix = np.load(calib_path) if os.path.exists(calib_path) else np.eye(4)
         
@@ -100,6 +111,19 @@ class BartenderNode(Node):
         if not self.get_pos_client.wait_for_service(timeout_sec=2.0):
             self.get_logger().warn("⚠️ get_current_pose 서비스 연결 실패 (현재 Z 기반 상승 보정 불가)")
 
+        # [토픽 구독] 메뉴명 수신 (아직은 주석 처리)
+        # self.create_subscription(String, '/customer_name', self.on_customer_name_received, 10)
+        # self.get_logger().info("Waiting for /customer_name topic...")
+
+        # [Action Server] Supervisor 연동용
+        self._action_server = ActionServer(
+            self,
+            Motion,
+            'recipe/motion',
+            self.execute_action_callback,
+            callback_group=ReentrantCallbackGroup()
+        )
+
         # 5. 변수 초기화
         self.current_recipe = None
         self.target_object = None   
@@ -108,6 +132,12 @@ class BartenderNode(Node):
         self.bottle_origin_pos = None 
         self.saved_vision_offset = [0.0, 0.0]
         self.saved_approach_dist = 0.0
+
+        # Action Feedback용 변수
+        self.current_goal_handle = None
+        self.action_event = threading.Event()
+        self.total_action_steps = 0
+        self.current_action_step = 0
 
         self.status_msg = "Waiting..."
         self.is_moving = False
@@ -118,7 +148,7 @@ class BartenderNode(Node):
         self.CURRENT_Z_HEIGHT = 359.12 
 
         # 컵 놓는 베이스 위치 (X, Y는 고정, Z는 가변)
-        self.BASE_HOME_POS = [307.16, -12.14, 78.81, 129.37, -177.29, 139.48]
+        self.BASE_HOME_POS = [389.39, 21.52, 55.59, 10.74, -179.71, 10.58]
         self.JOINT_HOME_POS = [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]
         
         # 병 탐색 위치
@@ -128,7 +158,7 @@ class BartenderNode(Node):
         # margin이 작을수록 병 쪽으로 더 많이 전진합니다.
         self.bottle_params = {
             "black_bottle": {"off_x": 0.0, "off_y": 0.0, "margin": 160.0},
-            "blue_bottle":  {"off_x": 5.0, "off_y": 0.0, "margin": 160.0},
+            "blue_bottle":  {"off_x": 5.0, "off_y": 0.0, "margin": 140.0},
             "default":      {"off_x": 0.0, "off_y": 0.0, "margin": 160.0}
         }
 
@@ -137,6 +167,14 @@ class BartenderNode(Node):
             "green_cup": 145.0,
             "black_cup": 80.0,
             "yellow_cup": 50.0
+        }
+
+        # [임시] DB에 컵 정보가 없을 경우를 대비한 매핑 (메뉴명 -> 컵)
+        self.menu_cup_map = {
+            "Blue Sapphire": "black_cup",
+            "Tequila Sunrise": "green_cup",
+            "Purple Rain": "yellow_cup",
+            "default": "black_cup"
         }
 
         self.set_robot_tcp()
@@ -153,6 +191,10 @@ class BartenderNode(Node):
         self.task_step = "idle"
         self.target_object = None
         self.vision_align_iter = 0
+        
+        # 액션 실행 중이었다면 중단 처리
+        if self.current_goal_handle is not None:
+            self.action_event.set()
 
     def set_robot_tcp(self):
         if self.set_tool_client.wait_for_service(timeout_sec=1.0):
@@ -168,6 +210,59 @@ class BartenderNode(Node):
         except Exception as e:
             self.get_logger().error(f"IO Error: {e}")
 
+    # --- DB 관련 메서드 ---
+    def fetch_recipe_from_db(self, menu_seq_or_name):
+        """DB에서 레시피 정보를 조회합니다."""
+        self.db_query_result = []
+        self.db_query_event.clear()
+
+        escaped_keyword = menu_seq_or_name.replace("'", "''")
+        # 요청된 쿼리문
+        query = f"""
+        SELECT name, pour_time
+        FROM bartender_menu_recipe
+        WHERE menu_seq LIKE '%{escaped_keyword}%'
+        ORDER BY created_at DESC
+        """
+        
+        self.get_logger().info(f"DB Query: {query.strip()}")
+        self.db_client.execute_query_with_response(query, callback=self.on_db_response)
+        
+        # 응답 대기 (최대 3초)
+        if self.db_query_event.wait(timeout=3.0):
+            return self.db_query_result
+        else:
+            self.get_logger().error("DB Query Timeout")
+            return []
+
+    def on_db_response(self, response):
+        if response.get('success', False):
+            self.db_query_result = response.get('result', [])
+        else:
+            self.get_logger().error(f"DB Error: {response.get('error')}")
+        self.db_query_event.set()
+
+    def on_customer_name_received(self, msg):
+        """토픽으로 메뉴명(또는 고객명에 매핑된 메뉴)을 받았을 때 처리"""
+        menu_name = msg.data.strip()
+        self.get_logger().info(f"Topic Received: {menu_name}")
+        # 여기서 process_order(menu_name) 호출 가능
+
+    def generate_action_sequence(self, recipe):
+        """액션 통신을 위해 작업 순서를 생성하여 반환/출력합니다."""
+        seq = []
+        seq.append(f"컵 픽업 ({recipe.get('cup', 'unknown')})")
+        seq.append(f"컵 배치")
+        
+        liquors = recipe.get('liquors', [])
+        for liquor in liquors:
+            seq.append(f"병 픽업 ({liquor['name']})")
+            seq.append(f"따르기 ({liquor['pour_time']}s)")
+            seq.append(f"병 반납")
+            
+        # seq.append(f"서빙 준비 완료")
+        return seq
+
     def user_input_loop(self):
         time.sleep(1)
         print("\n [System] 메뉴를 입력하세요 (예: blue_sapphire)")
@@ -178,27 +273,105 @@ class BartenderNode(Node):
                 user_input = input("\n메뉴 입력 >> ").strip()
                 if not user_input: continue
 
-                found = False
-                for r in self.recipe_data.get("recipes", []):
-                    if r["recipe_id"] == user_input:
-                        self.current_recipe = r
-                        self.target_object = r["cup"]
-                        self.task_step = "cup"
-                        self.liquor_idx = 0
-                        self.status_msg = "Moving to Start Pos..."
-                        self.is_moving = True 
-                        gripper.open_gripper()
-                        time.sleep(1.0) # [수정] 그리퍼 동작 안정화 대기 시간 증가
-                        self.get_logger().info(f"주문 접수: {r['display_name']}")
-                        self.move_to_initial_ready()
-                        found = True
-                        break
-                if not found: print("메뉴 없음.")
+                self.process_order(user_input)
+
             except: break
+
+    def process_order(self, menu_name):
+        """주문 처리 로직 (CLI 및 Action 공용)"""
+        # DB에서 레시피 조회
+        db_rows = self.fetch_recipe_from_db(menu_name)
+        
+        if not db_rows:
+            self.get_logger().error(f"❌ DB에서 '{menu_name}' 레시피를 찾을 수 없습니다.")
+            return False
+
+        # DB 결과를 레시피 포맷으로 변환
+        liquors = []
+        for row in db_rows:
+            l_name = row.get('name')
+            l_time = float(row.get('pour_time', 2.0))
+            liquors.append({"name": l_name, "pour_time": l_time})
+
+        # 컵 정보 매핑
+        cup_type = self.menu_cup_map.get(menu_name, "black_cup")
+
+        self.current_recipe = {
+            "recipe_id": menu_name,
+            "display_name": menu_name,
+            "cup": cup_type,
+            "liquors": liquors
+        }
+
+        # 액션 시퀀스 생성 및 단계 수 계산
+        action_seq = self.generate_action_sequence(self.current_recipe)
+        self.total_action_steps = len(action_seq)
+        self.current_action_step = 0
+        
+        self.get_logger().info(f"📋 작업 시퀀스 ({self.total_action_steps}단계):\n" + "\n".join(action_seq))
+
+        self.target_object = cup_type
+        self.task_step = "cup"
+        self.liquor_idx = 0
+        self.status_msg = "Moving to Start Pos..."
+        self.is_moving = True 
+        
+        gripper.open_gripper()
+        time.sleep(1.0)
+        
+        self.get_logger().info(f"주문 접수: {menu_name}")
+        self.move_to_initial_ready()
+        return True
+
+    def execute_action_callback(self, goal_handle):
+        """Action Server 콜백"""
+        motion_name = goal_handle.request.motion_name
+        self.get_logger().info(f"Action Goal Received: {motion_name}")
+
+        if self.is_moving:
+            self.get_logger().warn("이미 작업 중입니다. 요청 거부.")
+            goal_handle.abort()
+            return Motion.Result(success=False, message="Busy")
+
+        self.current_goal_handle = goal_handle
+        self.action_event.clear()
+
+        # 주문 처리 시작
+        if not self.process_order(motion_name):
+            goal_handle.abort()
+            self.current_goal_handle = None
+            return Motion.Result(success=False, message="Recipe not found")
+
+        # 작업 완료 대기 (비동기 콜백 체인이 끝날 때까지)
+        self.action_event.wait()
+
+        self.current_goal_handle = None
+        goal_handle.succeed()
+        return Motion.Result(success=True, message="Completed", total_time_ms=0)
+
+    def report_progress(self, step_desc):
+        """액션 피드백 발행"""
+        if self.current_goal_handle is None:
+            return
+
+        self.current_action_step += 1
+        progress = int((self.current_action_step / self.total_action_steps) * 100)
+        progress = min(100, max(0, progress))
+
+        feedback = Motion.Feedback()
+        feedback.progress = progress
+        feedback.current_step = f"[{self.current_action_step}/{self.total_action_steps}] {step_desc}"
+        
+        self.current_goal_handle.publish_feedback(feedback)
+        self.get_logger().info(f"📢 Feedback: {feedback.current_step} ({progress}%)")
 
     def move_to_initial_ready(self):
         # [수정] 초기 이동 시 안전을 위해 Joint Home 경유
         self.get_logger().info("초기 위치 이동: Joint Home -> Ready Pos")
+        
+        # Feedback: 컵 픽업 시작
+        self.report_progress(f"컵 픽업 ({self.target_object})")
+
         if not self.move_joint_client.wait_for_service(timeout_sec=1.0):
             self.abort_task("move_joint 서비스 미연결")
             return
@@ -748,6 +921,9 @@ class BartenderNode(Node):
     def finish_cup_task(self, future):
         if future.result().success:
             self.get_logger().info("✅ 컵 배치 완료. 그리퍼 해제")
+            
+            self.report_progress("컵 배치")
+
             gripper.open_gripper()
             
             # 안전하게 위로 빠져나오기 (Base 기준 +Z 100mm 상승)
@@ -807,6 +983,9 @@ class BartenderNode(Node):
             if self.liquor_idx < len(liquors):
                 bottle_name = liquors[self.liquor_idx]['name']
                 self.target_object = bottle_name
+                
+                self.report_progress(f"병 픽업 ({bottle_name})")
+
                 self.task_step = "bottle"
                 self.saved_vision_offset = [0.0, 0.0]
                 self.saved_approach_dist = 0.0
@@ -846,7 +1025,9 @@ class BartenderNode(Node):
             cup_z = float(self.cup_place_target_z.get(cup_name, 85.0))
 
             base_ref_cup_z = 85.0
-            pour_extra_z = 50.0
+            # [수정] Yellow Cup(Z=50) 실측 보정: 183.68 -> 126.98 (Diff: -56.7)
+            # 기존 pour_extra_z(50.0) - 56.7 = -6.7
+            pour_extra_z = -6.7
             pour_start_z = cup_z + (146.83 - base_ref_cup_z) + pour_extra_z
             pour_end_z = cup_z + (168.70 - base_ref_cup_z) + pour_extra_z
 
@@ -888,6 +1069,8 @@ class BartenderNode(Node):
             self.status_msg = "Pouring..."
             self.get_logger().info("🍷 따르기 (기울이기)")
             
+            self.report_progress("따르기")
+            
             # [추가] pour_time 가져오기
             try:
                 pour_time = float(self.current_recipe['liquors'][self.liquor_idx].get('pour_time', 2.0))
@@ -926,6 +1109,8 @@ class BartenderNode(Node):
         if future.result().success:
             self.status_msg = "Returning Bottle..."
             self.get_logger().info("🍾 병 원래 위치로 복귀 시작 (1. 수직 상승)")
+            
+            self.report_progress("병 반납")
 
             # [수정] pour Z가 cup마다 달라지므로(+50mm 포함),
             # 상대 +350mm 대신 Base 절대 Z=580까지 올려 상공을 보장합니다.
@@ -1030,6 +1215,7 @@ class BartenderNode(Node):
         self.liquor_idx += 1
         self.get_logger().info(f"🍾 다음 병 준비 (Index: {self.liquor_idx})")
         self.move_to_bottle_view(future)
+        time.sleep(0.2)
 
     def finish_all_tasks(self):
         self.status_msg = "All Done. Homing..."
@@ -1042,6 +1228,9 @@ class BartenderNode(Node):
         req.pos = self.JOINT_HOME_POS
         req.vel = 50.0; req.acc = 30.0
         self.move_joint_client.call_async(req)
+        
+        # Action 완료 이벤트 설정
+        self.action_event.set()
         self.reset_state()
 
     def reset_state(self):
@@ -1073,7 +1262,10 @@ def main(args=None):
         rclpy.shutdown()
         return
 
-    try: rclpy.spin(node)
+    # [수정] Action Server(Blocking Callback)와 Service Callback 동시 처리를 위해 MultiThreadedExecutor 사용
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
+    try: executor.spin()
     except KeyboardInterrupt: pass
     finally:
         node.destroy_node()
