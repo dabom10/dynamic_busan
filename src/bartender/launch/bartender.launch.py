@@ -1,15 +1,31 @@
 #!/usr/bin/env python3
 """
 Bartender Complete Launch File
-- MariaDB Node
-- Query Node
-- Shake Node (optional)
+
+노드 구성:
+  - MariaDB Node (DB 연결)
+  - Recipe Node (레시피 액션 서버)
+  - Shake Node (쉐이크 액션 서버)
+  - Topping Node (토핑 액션 서버, 선택)
+  - Tracking Node (사람 추적)
+  - Recovery Node (복구 처리)
+  - Supervisor Node (전체 흐름 제어)
+
+연동 흐름:
+  supervisor --(/customer_name)--> tracking --(/disappeared_customer_name)--> recovery
+      |                                |
+      +----(Action)---> recipe/shake/topping ----(get_pose srv)----+
+
+사용법:
+  기본 (topping 없음): ros2 launch bartender bartender.launch.py
+  topping 포함:       ros2 launch bartender bartender.launch.py with_topping:=true
 """
 import os
 from pathlib import Path
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
+from launch.conditions import IfCondition, UnlessCondition
 from launch_ros.actions import Node
 
 def generate_launch_description():
@@ -18,7 +34,6 @@ def generate_launch_description():
     # .env 파일 로드 (python-dotenv 사용)
     try:
         from dotenv import load_dotenv
-        # 사용자 홈 디렉토리 기준 경로 (~/dynamic_busan/.env)
         env_path = Path.home() / 'dynamic_busan' / '.env'
         print(f"[DEBUG] Loading .env from: {env_path}")
         print(f"[DEBUG] .env file exists: {env_path.exists()}")
@@ -45,7 +60,9 @@ def generate_launch_description():
     print(f"  DB_NAME: {db_name}")
     print("="*50)
 
-    # Launch 인자 선언 (환경 변수 값을 기본값으로 사용)
+    # =========================================================================
+    # Launch 인자 선언
+    # =========================================================================
     db_host_arg = DeclareLaunchArgument(
         'db_host',
         default_value=db_host,
@@ -76,8 +93,19 @@ def generate_launch_description():
         description='Database name'
     )
 
+    # Topping 포함 여부
+    with_topping_arg = DeclareLaunchArgument(
+        'with_topping',
+        default_value='false',
+        description='Include topping node and use supervisor_full (true/false)'
+    )
+
+    # =========================================================================
+    # 노드 정의
+    # =========================================================================
+
     # MariaDB 노드
-    mariadb_node = Node(    
+    mariadb_node = Node(
         package='bartender',
         executable='db',
         name='mariadb_node',
@@ -91,15 +119,6 @@ def generate_launch_description():
         }],
         emulate_tty=True,
     )
-
-    # Query 노드 (대화형 모드)
-    # query_node = Node(
-    #     package='bartender',
-    #     executable='query',
-    #     name='query_node',
-    #     output='screen',
-    #     emulate_tty=True,
-    # )
 
     # Recipe 노드
     recipe_node = Node(
@@ -119,15 +138,57 @@ def generate_launch_description():
         emulate_tty=True,
     )
 
-    # Supervisor 노드 (STT + 전체 흐름 제어 통합)
+    # Topping 노드 (with_topping=true일 때만 실행)
+    topping_node = Node(
+        package='bartender',
+        executable='topping_node',
+        name='topping_node',
+        output='screen',
+        emulate_tty=True,
+        condition=IfCondition(LaunchConfiguration('with_topping')),
+    )
+
+    # Tracking 노드 (사람 추적)
+    tracking_node = Node(
+        package='bartender',
+        executable='tracking',
+        name='tracking_node',
+        output='screen',
+        emulate_tty=True,
+    )
+
+    # Recovery 노드 (복구 처리)
+    recovery_node = Node(
+        package='bartender',
+        executable='recovery',
+        name='recovery_node',
+        output='screen',
+        emulate_tty=True,
+    )
+
+    # Supervisor 노드 (topping 없음)
     supervisor_node = Node(
         package='bartender',
         executable='supervisor',
         name='supervisor_node',
         output='screen',
         emulate_tty=True,
+        condition=UnlessCondition(LaunchConfiguration('with_topping')),
     )
 
+    # Supervisor Full 노드 (topping 포함)
+    supervisor_full_node = Node(
+        package='bartender',
+        executable='supervisor_full',
+        name='supervisor_node_full',
+        output='screen',
+        emulate_tty=True,
+        condition=IfCondition(LaunchConfiguration('with_topping')),
+    )
+
+    # =========================================================================
+    # Launch Description 반환
+    # =========================================================================
     return LaunchDescription([
         # Launch 인자들
         db_host_arg,
@@ -135,10 +196,17 @@ def generate_launch_description():
         db_user_arg,
         db_password_arg,
         db_name_arg,
+        with_topping_arg,
 
-        # 노드들
+        # 공통 노드들
         mariadb_node,
         recipe_node,
         shake_node,
-        supervisor_node,
+        tracking_node,
+        recovery_node,
+
+        # 조건부 노드들
+        topping_node,         # with_topping=true일 때만
+        supervisor_node,      # with_topping=false일 때
+        supervisor_full_node, # with_topping=true일 때
     ])
