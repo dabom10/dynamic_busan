@@ -473,11 +473,10 @@ class BartenderNode(Node):
     def timer_callback(self):
         annotated_frame = None
         try:
-            # 1. 프레임 받기 (타임아웃 체크)
-            frames = self.pipeline.wait_for_frames(timeout_ms=2000)
+            # 1. 프레임 받기 (non-blocking)
+            frames = self.pipeline.poll_for_frames()
             if not frames:
-                self.get_logger().warn("RealSense 프레임 없음!")
-                return
+                return  # 프레임 없으면 바로 리턴
 
             aligned_frames = self.align.process(frames)
             color_frame = aligned_frames.get_color_frame()
@@ -580,17 +579,15 @@ class BartenderNode(Node):
             if cv2.waitKey(1) == 27: rclpy.shutdown()
 
         except Exception as e:
-            # ★★★ 여기서 진짜 원인을 출력합니다 ★★★
-            self.get_logger().error(f"Vision Loop Error: {e}")
+            # 프레임이 없거나 일시적 에러는 치명적이지 않음
+            self.get_logger().warn(f"Vision Loop Error: {e}")
             if annotated_frame is not None:
                 try:
                     self.pub_img.publish(self.br.cv2_to_imgmsg(annotated_frame, encoding="bgr8"))
                 except: pass
-                
+
                 cv2.imshow("Bartender Vision", annotated_frame)
                 if cv2.waitKey(1) == 27: rclpy.shutdown()
-
-        except Exception: pass
 
     # --- 동작 로직 ---
     def execute_eye_in_hand_move(self, offset_x, offset_y, offset_z):
