@@ -30,7 +30,7 @@ setup(
         'shake = bartender.shake.shake_node:main',
         'recipe = bartender.recipe.recipe_node:main',
         'tracking = bartender.ob_tracking.tracking_node:main',
-        # 'db = bartender.db.mariadb_node:main',
+        'db = bartender.db.mariadb_node:main',
         'query = bartender.db.query_node:main',
         'recovery = bartender.recovery.recovery_node:main',
         'stt = bartender.stt.stt_node:main',
