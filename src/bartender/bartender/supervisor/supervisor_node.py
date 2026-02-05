@@ -28,6 +28,7 @@ import tempfile
 import os
 from dotenv import load_dotenv
 from konlpy.tag import Komoran
+from difflib import get_close_matches
 
 # wakeup
 from bartender.stt.wakeup import WakeupWord
@@ -85,6 +86,10 @@ class SupervisorNode(Node):
         self.openai_client = OpenAI(api_key=api_key)
         self.duration = 5
         self.samplerate = 16000
+
+        # 확인 단계 설정 (False로 바꾸면 확인 단계 생략)
+        self.enable_confirmation = True
+        self.confirmation_duration = 5  # 확인 응답 대기 시간 (초)
 
         # Wakeup
         self.mic = MicController.MicController()
@@ -144,8 +149,27 @@ class SupervisorNode(Node):
                 self.is_running = False
                 return
 
-            name = filtered[0]
-            menu = " ".join(filtered[1:]) if len(filtered) > 1 else ""
+            # 메뉴를 먼저 찾고, 그 이전을 이름으로 처리
+            name_parts = []
+            menu_parts = []
+
+            for noun in filtered:
+                # 현재 명사가 메뉴에 포함되는지 확인
+                is_menu = False
+                for valid_menu in self.valid_menus:
+                    if noun in valid_menu.replace(" ", ""):
+                        is_menu = True
+                        break
+
+                if is_menu:
+                    menu_parts.append(noun)
+                else:
+                    # 메뉴가 아직 안 나왔으면 이름에 추가
+                    if not menu_parts:
+                        name_parts.append(noun)
+
+            name = "".join(name_parts)  # 공백 없이 결합 (예: "서동" + "찬" = "서동찬")
+            menu = " ".join(menu_parts)  # 공백으로 결합 (예: "블루 사파이어")
 
             # 이름 저장 및 tracking에 전달
             self.current_customer = name
@@ -164,6 +188,13 @@ class SupervisorNode(Node):
             # 메뉴 검증
             valid_menu = self.validate_menu(menu)
             if valid_menu:
+                # 확인 단계 (enable_confirmation이 True일 때만)
+                if self.enable_confirmation:
+                    if not self.ask_confirmation(name, valid_menu):
+                        self.get_logger().warn("❌ 다시 입력해주세요.")
+                        self.listen_and_process()
+                        return
+
                 self.current_menu = valid_menu
                 self.save_to_database(name, valid_menu)
                 self.get_logger().info(f"=== Order: {name}, Menu: {valid_menu} ===")
@@ -189,6 +220,7 @@ class SupervisorNode(Node):
         """메뉴 유효성 검사. 유효하면 정규화된 메뉴명 반환, 아니면 None"""
         menu_normalized = menu.replace(" ", "")  # 공백 제거하여 비교
 
+        # 1. 정확히 일치하는지 확인
         for valid_menu in self.valid_menus:
             valid_normalized = valid_menu.replace(" ", "")
             if menu_normalized == valid_normalized:
@@ -200,7 +232,58 @@ class SupervisorNode(Node):
                     if vm.replace(" ", "") == valid_normalized and " " in vm:
                         return vm
                 return valid_menu
+
+        # 2. Fuzzy Matching (공백 있는 정규 메뉴만 대상)
+        valid_menus_spaced = [m for m in self.valid_menus if " " in m]
+        matches = get_close_matches(menu, valid_menus_spaced, n=1, cutoff=0.6)
+        if matches:
+            self.get_logger().info(f"🔍 Fuzzy match: '{menu}' → '{matches[0]}'")
+            return matches[0]
+
         return None
+
+    def ask_confirmation(self, name: str, menu: str) -> bool:
+        """주문 확인 (예/아니요 판단)"""
+        try:
+            self.get_logger().info(f"고객님 성함은 '{name}', 메뉴는 '{menu}' 맞으신가요?")
+            self.get_logger().info(f"({self.confirmation_duration}초 안에 대답해주세요)")
+
+            # 음성 녹음
+            audio = sd.rec(
+                int(self.confirmation_duration * self.samplerate),
+                samplerate=self.samplerate,
+                channels=1,
+                dtype="int16",
+            )
+            sd.wait()
+            self.get_logger().info("확인 응답 처리 중...")
+
+            # STT 처리
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
+                wav.write(temp_wav.name, self.samplerate, audio)
+                with open(temp_wav.name, "rb") as f:
+                    transcript = self.openai_client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=f,
+                    )
+
+            response = transcript.text.lower()
+            self.get_logger().info(f"확인 응답: {response}")
+
+            # 긍정 단어 확인
+            positive_words = ["예", "네", "맞", "응", "어", "yes", "ok", "오케이", "확인"]
+            is_positive = any(word in response for word in positive_words)
+
+            if is_positive:
+                self.get_logger().info("✅ 주문이 확인되었습니다!")
+                return True
+            else:
+                self.get_logger().warn("❌ 주문이 취소되었습니다.")
+                return False
+
+        except Exception as e:
+            self.get_logger().error(f"확인 단계 에러: {e}")
+            return False
 
     def listen_for_menu_only(self):
         """메뉴만 다시 입력받기 (이름은 유지)"""
@@ -245,6 +328,13 @@ class SupervisorNode(Node):
             # 메뉴 검증
             valid_menu = self.validate_menu(menu)
             if valid_menu:
+                # 확인 단계 (enable_confirmation이 True일 때만)
+                if self.enable_confirmation:
+                    if not self.ask_confirmation(self.current_customer, valid_menu):
+                        self.get_logger().warn("❌ 다시 입력해주세요.")
+                        self.listen_for_menu_only()
+                        return
+
                 self.current_menu = valid_menu
                 self.get_logger().info(f"=== 메뉴 확인: {valid_menu} ===")
                 self.start_sequence()
