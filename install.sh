@@ -9,7 +9,6 @@ echo "=========================================="
 echo "[1/3] 시스템 패키지 설치..."
 sudo apt-get update
 sudo apt-get install -y \
-    libmariadb-dev \
     portaudio19-dev \
     python3-pip
 

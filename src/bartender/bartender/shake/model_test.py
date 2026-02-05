@@ -1,6 +1,7 @@
 import pyrealsense2 as rs
 import numpy as np
 import cv2
+import os
 from ultralytics import YOLO
 from sklearn.decomposition import PCA
 
@@ -8,7 +9,8 @@ def main():
     # ---------------------------------------------------------
     # 1. 설정 및 초기화
     # ---------------------------------------------------------
-    model_path = '/home/rokey/dynamic_busan/src/bartender/bartender/shake/best.pt'  # 아까 학습된 모델 파일 경로
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    model_path = os.path.join(current_dir, 'best.pt')  # 같은 폴더의 best.pt 사용
     print(f"모델 로딩 중: {model_path}...")
     model = YOLO(model_path)
 
