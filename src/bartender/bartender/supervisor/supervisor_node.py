@@ -61,6 +61,18 @@ class SupervisorNode(Node):
         self.current_index = 0
         self.is_running = False
         self.current_customer = None
+        self.current_menu = None  # 현재 주문 메뉴 (cup_pick에 전달)
+
+        # 유효한 메뉴 목록 (recipe.json의 recipe_id = DB의 menu_seq)
+        self.valid_menus = [
+            "블루 사파이어", "블루사파이어",
+            "테킬라 선라이즈", "테킬라선라이즈",
+            "퍼플 레인", "퍼플레인",
+            "진 앤 토닉", "진앤토닉",
+            "트로피컬 오션", "트로피컬오션",
+            "화이트 마가리타", "화이트마가리타",
+            "블루 라군", "블루라군",
+        ]
 
         # DB Client
         self.db_client = DBClient(self)
@@ -135,17 +147,31 @@ class SupervisorNode(Node):
             name = filtered[0]
             menu = " ".join(filtered[1:]) if len(filtered) > 1 else ""
 
-            self.save_to_database(name, menu)
+            # 이름 저장 및 tracking에 전달
             self.current_customer = name
-            self.get_logger().info(f"=== Order: {name} ===")
-
-            # tracking_node에 고객 이름 전달
             name_msg = String()
             name_msg.data = name
             self.pub_customer_name.publish(name_msg)
             self.get_logger().info(f"[PUB] /customer_name: {name}")
-            #sd.wait()
-            self.start_sequence()
+
+            # 메뉴가 없으면 메뉴만 다시 받기
+            if not menu:
+                self.get_logger().warn(f"이름 '{name}'은(는) 확인되었습니다. 메뉴를 말해주세요.")
+                self.get_logger().info(f"📋 가능한 메뉴: {', '.join([m for m in self.valid_menus if ' ' in m])}")
+                self.listen_for_menu_only()
+                return
+
+            # 메뉴 검증
+            valid_menu = self.validate_menu(menu)
+            if valid_menu:
+                self.current_menu = valid_menu
+                self.save_to_database(name, valid_menu)
+                self.get_logger().info(f"=== Order: {name}, Menu: {valid_menu} ===")
+                self.start_sequence()
+            else:
+                self.get_logger().warn(f"❌ '{menu}'은(는) 잘못된 메뉴입니다. 다시 말해주세요.")
+                self.get_logger().info(f"📋 가능한 메뉴: {', '.join([m for m in self.valid_menus if ' ' in m])}")
+                self.listen_for_menu_only()
 
         except Exception as e:
             self.get_logger().error(f"STT Error: {e}")
@@ -158,6 +184,79 @@ class SupervisorNode(Node):
         VALUES ('{name.replace("'", "''")}', '{menu.replace("'", "''")}')
         """
         self.db_client.execute_query_with_response(query)
+
+    def validate_menu(self, menu: str) -> str:
+        """메뉴 유효성 검사. 유효하면 정규화된 메뉴명 반환, 아니면 None"""
+        menu_normalized = menu.replace(" ", "")  # 공백 제거하여 비교
+
+        for valid_menu in self.valid_menus:
+            valid_normalized = valid_menu.replace(" ", "")
+            if menu_normalized == valid_normalized:
+                # 공백 있는 정규 메뉴명 반환 (DB와 일치)
+                if " " in valid_menu:
+                    return valid_menu
+                # 공백 없는 버전이면 공백 있는 버전 찾기
+                for vm in self.valid_menus:
+                    if vm.replace(" ", "") == valid_normalized and " " in vm:
+                        return vm
+                return valid_menu
+        return None
+
+    def listen_for_menu_only(self):
+        """메뉴만 다시 입력받기 (이름은 유지)"""
+        try:
+            self.get_logger().info("메뉴를 다시 말해주세요 (5초)...")
+
+            audio = sd.rec(
+                int(self.duration * self.samplerate),
+                samplerate=self.samplerate,
+                channels=1,
+                dtype="int16",
+            )
+            sd.wait()
+            self.get_logger().info("녹음 완료, STT 처리 중...")
+
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
+                wav.write(temp_wav.name, self.samplerate, audio)
+                with open(temp_wav.name, "rb") as f:
+                    transcript = self.openai_client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=f,
+                    )
+
+            line = transcript.text
+            self.get_logger().info(f"STT 결과: {line}")
+
+            # 명사 추출 (메뉴만)
+            komoran = Komoran()
+            nouns = komoran.nouns(line)
+            stop_words = ['안녕', '이름', '잔', '메뉴', '주문']
+            filtered = [n for n in nouns if not any(word in n for word in stop_words)]
+
+            self.get_logger().info(f"명사: {nouns} → 필터: {filtered}")
+
+            if not filtered:
+                self.get_logger().warn("메뉴 인식 실패. 처음부터 다시 시도해주세요.")
+                self.reset_state()
+                return
+
+            menu = " ".join(filtered)
+
+            # 메뉴 검증
+            valid_menu = self.validate_menu(menu)
+            if valid_menu:
+                self.current_menu = valid_menu
+                self.get_logger().info(f"=== 메뉴 확인: {valid_menu} ===")
+                self.start_sequence()
+            else:
+                self.get_logger().warn(f"❌ '{menu}'은(는) 잘못된 메뉴입니다. 다시 말해주세요.")
+                self.get_logger().info(f"📋 가능한 메뉴: {', '.join([m for m in self.valid_menus if ' ' in m])}")
+                # 재귀적으로 메뉴만 다시 받기
+                self.listen_for_menu_only()
+
+        except Exception as e:
+            self.get_logger().error(f"STT Error: {e}")
+            self.reset_state()
 
     def start_sequence(self):
         """모션 시퀀스 시작"""
@@ -191,12 +290,18 @@ class SupervisorNode(Node):
         motion = self.motion_sequence[self.current_index]
         client = self._action_clients[motion['client']]
 
+        # recipe 액션일 때는 실제 메뉴명 전달
+        if motion['client'] == 'recipe' and self.current_menu:
+            action_name = self.current_menu
+        else:
+            action_name = motion['name']
+
         self.get_logger().info(
-            f"[{self.current_index + 1}/{len(self.motion_sequence)}] {motion['client']}: {motion['name']}"
+            f"[{self.current_index + 1}/{len(self.motion_sequence)}] {motion['client']}: {action_name}"
         )
 
         goal = Motion.Goal()
-        goal.motion_name = motion['name']
+        goal.motion_name = action_name
         future = client.send_goal_async(goal, feedback_callback=self.on_feedback)
         future.add_done_callback(self.on_goal_accepted)
 
@@ -224,6 +329,7 @@ class SupervisorNode(Node):
         """상태 초기화"""
         self.is_running = False
         self.current_customer = None
+        self.current_menu = None
         self.current_index = 0
         self.get_logger().info("Ready for next customer...")
 
