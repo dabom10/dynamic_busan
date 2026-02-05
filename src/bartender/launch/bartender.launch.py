@@ -123,8 +123,8 @@ def generate_launch_description():
     # Recipe 노드
     recipe_node = Node(
         package='bartender',
-        executable='recipe',
-        name='recipe_node',
+        executable='cup_pick',
+        name='cup_pick_node',
         output='screen',
         emulate_tty=True,
     )
