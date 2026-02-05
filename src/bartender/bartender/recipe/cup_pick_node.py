@@ -66,9 +66,13 @@ class BartenderNode(Node):
         #         self.recipe_data = json.load(f)
         # else:
         #     self.get_logger().error("recipe.json 없음"); sys.exit(1)
-        
-        # DB 클라이언트 초기화
-        self.db_client = DBClient(self)
+
+        # Callback Group 생성 (Action과 DB 응답을 동시 처리)
+        self._callback_group = ReentrantCallbackGroup()
+        self.get_logger().info(f"🔧 ReentrantCallbackGroup 생성됨: {self._callback_group}")
+        # DB 클라이언트 초기화 (callback_group 전달)
+        self.db_client = DBClient(self, callback_group=self._callback_group)
+        self.get_logger().info("✅ DBClient 초기화 완료 (callback_group 전달)")
         self.db_query_event = threading.Event()
         self.db_query_result = []
 
@@ -100,6 +104,20 @@ class BartenderNode(Node):
         self.move_line_client = self.create_client(MoveLine, '/dsr01/motion/move_line')
         self.move_joint_client = self.create_client(MoveJoint, '/dsr01/motion/move_joint')
         self.io_client = self.create_client(SetCtrlBoxDigitalOutput, '/dsr01/io/set_ctrl_box_digital_output')
+
+        # 로봇 서비스 클라이언트들도 ReentrantCallbackGroup 사용 (Action 실행 중 응답 받기 위해)
+        self.move_line_client = self.create_client(
+        MoveLine, '/dsr01/motion/move_line', callback_group=self._callback_group)
+        self.move_joint_client = self.create_client(
+        MoveJoint, '/dsr01/motion/move_joint', callback_group=self._callback_group)
+        self.io_client = self.create_client(
+        SetCtrlBoxDigitalOutput, '/dsr01/io/set_ctrl_box_digital_output', callback_group=self._callback_group)
+        # Doosan ROS2 표준 서비스명은 get_current_pose 입니다. (get_current_pos 아님)
+        self.get_pos_client = self.create_client(
+        GetCurrentPos, '/dsr01/system/get_current_pose', callback_group=self._callback_group)
+        self.set_tool_client = self.create_client(
+        SetCurrentTool, '/dsr01/system/set_current_tool', callback_group=self._callback_group)
+
         # Doosan ROS2 표준 서비스명은 get_current_pose 입니다. (get_current_pos 아님)
         self.get_pos_client = self.create_client(GetCurrentPos, '/dsr01/system/get_current_pose')
         self.set_tool_client = self.create_client(SetCurrentTool, '/dsr01/system/set_current_tool')
