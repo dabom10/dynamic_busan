@@ -3,14 +3,7 @@
 
 import sys
 import os
-
-try:
-    import rclpy
-except ModuleNotFoundError:
-    sys.path.append('/opt/ros/humble/lib/python3.10/site-packages')
-    sys.path.append('/opt/ros/humble/local/lib/python3.10/dist-packages')
-    import rclpy
-
+import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge
@@ -26,8 +19,6 @@ from ultralytics import YOLO
 import pyrealsense2 as rs
 import threading
 import time
-import sys
-import os
 
 # DB 클라이언트 및 Depth Estimation 유틸리티 임포트
 from bartender.recipe.depth_estimation import estimate_depth_from_window
@@ -40,7 +31,7 @@ from bartender_interfaces.action import Motion
 ROBOT_ID = "dsr01"
 ROBOT_MODEL = "m0609"
 ROBOT_TOOL = "Tool Weight"
-ROBOT_TCP = "GripperDA_v2"
+ROBOT_TCP = "GripperDA_v1"
 
 # ==============================================================================
 # [Doosan ROS2 라이브러리 경로 추가]
@@ -188,7 +179,7 @@ class ToppingNode(Node):
         self.TOPPING_VIEW_POS = [300.0, 0.0, 400.0, 0.0, 180.0, 0.0]
         
         # 음료 위에 토핑을 올리는 위치
-        self.DRINK_TOPPING_POS = [250.0, 100.0, 350.0, 0.0, 180.0, 0.0]
+        self.DRINK_TOPPING_POS = [307.16, -12.14, 78.81, 129.37, -177.29, 139.48]
         
         # 홈 위치
         self.HOME_POSITION = [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]
@@ -218,8 +209,8 @@ class ToppingNode(Node):
         # [13. 타이머 콜백 시작 (Vision Loop)]
         # ==============================================================================
         # 30Hz (0.033초마다) 카메라 이미지 처리 및 객체 인식
-        self.timer = self.create_timer(0.033, self.timer_callback)
-        
+        # self.timer = self.create_timer(0.033, self.timer_callback) # 메인 루프에서 직접 호출하도록 변경
+
         self.get_logger().info("✅ 토핑 노드 초기화 완료")
     
     # ==============================================================================
@@ -920,6 +911,7 @@ def main(args=None):
     """메인 함수"""
     rclpy.init(args=args)
     
+    import DR_init
     # Doosan 로봇 초기화
     DR_init.__dsr__id = ROBOT_ID
     DR_init.__dsr__model = ROBOT_MODEL
@@ -942,14 +934,18 @@ def main(args=None):
     executor.add_node(node)
     
     try:
-        executor.spin()
+        # 메인 스레드에서 비전 처리를, 서브 스레드에서 ROS 통신을 처리
+        while rclpy.ok():
+            # ROS2 콜백 및 서비스 처리 (non-blocking)
+            executor.spin_once(timeout_sec=0.001)
+            # 비전 처리 (cv2.imshow는 메인 스레드에서 호출되어야 안정적)
+            node.timer_callback()
     except KeyboardInterrupt:
         pass
     finally:
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
-
 
 if __name__ == "__main__":
     main()
