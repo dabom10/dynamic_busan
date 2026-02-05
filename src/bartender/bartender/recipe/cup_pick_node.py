@@ -250,6 +250,20 @@ class BartenderNode(Node):
         self.get_logger().info(f"DB Query: {query.strip()}")
         self.db_client.execute_query_with_response(query, callback=self.on_db_response)
         
+        # 응답 대기 (명시적으로 executor spin - 콜백 처리)
+        import time
+        import rclpy
+        timeout = 5.0
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            # Executor를 명시적으로 spin해서 콜백 처리
+            rclpy.spin_once(self, timeout_sec=0.01)
+            if self.db_query_event.is_set():
+                self.get_logger().info("✅ DB 응답 수신 완료!")
+                return self.db_query_result
+            self.get_logger().error("DB Query Timeout")
+            return []
+
         # 응답 대기 (최대 3초)
         if self.db_query_event.wait(timeout=3.0):
             return self.db_query_result
@@ -367,11 +381,29 @@ class BartenderNode(Node):
             return Motion.Result(success=False, message="Recipe not found")
 
         # 작업 완료 대기 (비동기 콜백 체인이 끝날 때까지)
-        self.action_event.wait()
+        # DB timeout 해결과 같은 방법: polling + spin_once로 콜백 처리
+        import time
+        timeout = 300.0  # 5분
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            rclpy.spin_once(self, timeout_sec=0.01)
+
+            if self.action_event.is_set():
+                self.get_logger().info("✅ 작업 완료!")
+                break
+
+            time.sleep(0.01)
+
+        if not self.action_event.is_set():
+            self.get_logger().error("❌ Action Timeout (5분 초과)")
+            goal_handle.abort()
+            self.current_goal_handle = None
+            return Motion.Result(success=False, message="Timeout")
 
         self.current_goal_handle = None
         goal_handle.succeed()
-        return Motion.Result(success=True, message="Completed", total_time_ms=0)
+        return Motion.Result(success=True, message="Completed", total_time_ms=0)        
 
     def report_progress(self, step_desc):
         """액션 피드백 발행"""
