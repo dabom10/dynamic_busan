@@ -8,10 +8,14 @@ endif()
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+find_package(builtin_interfaces REQUIRED)
+find_package(geometry_msgs REQUIRED)
 
-# Action 파일 선언
+# Action & Service 파일 선언
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/Motion.action"
+  "srv/DrinkDelivery.srv"
+  DEPENDENCIES builtin_interfaces geometry_msgs
 )
 
 if(BUILD_TESTING)

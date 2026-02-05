@@ -35,7 +35,7 @@ from ultralytics import YOLO
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, Int32, Float32MultiArray, Int32MultiArray, String
-from srv_interfaces.srv import DrinkDelivery
+from bartender_interfaces.srv import DrinkDelivery
 
 # =============================================================================
 # 로봇팔 구역별 좌표 (미리 캘리브레이션된 값)

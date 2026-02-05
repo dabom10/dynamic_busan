@@ -2,7 +2,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge
-from srv_interfaces.srv import DrinkDelivery
+from bartender_interfaces.srv import DrinkDelivery
 from geometry_msgs.msg import Point
 import DR_init
 import cv2
