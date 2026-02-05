@@ -120,10 +120,10 @@ def generate_launch_description():
         emulate_tty=True,
     )
 
-    # Recipe 노드
+    # Recipe 노드 (cup_pick_node 실행 - 실제 로봇 제어)
     recipe_node = Node(
         package='bartender',
-        executable='recipe',
+        executable='cup_pick',
         name='recipe_node',
         output='screen',
         emulate_tty=True,
