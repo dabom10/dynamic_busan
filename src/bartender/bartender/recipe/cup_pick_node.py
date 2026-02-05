@@ -219,7 +219,7 @@ class BartenderNode(Node):
         escaped_keyword = menu_seq_or_name.replace("'", "''")
         # 요청된 쿼리문
         query = f"""
-        SELECT name, pour_time
+        SELECT name, pour_time, cup
         FROM bartender_menu_recipe
         WHERE menu_seq LIKE '%{escaped_keyword}%'
         ORDER BY created_at DESC
@@ -293,8 +293,10 @@ class BartenderNode(Node):
             l_time = float(row.get('pour_time', 2.0))
             liquors.append({"name": l_name, "pour_time": l_time})
 
-        # 컵 정보 매핑
-        cup_type = self.menu_cup_map.get(menu_name, "black_cup")
+        # 컵 정보 매핑 (DB 첫 번째 row 사용)
+        cup_type = db_rows[0].get('cup')
+        if not cup_type:
+            cup_type = self.menu_cup_map.get(menu_name, "black_cup")
 
         self.current_recipe = {
             "recipe_id": menu_name,
