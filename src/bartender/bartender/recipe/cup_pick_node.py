@@ -144,8 +144,8 @@ class BartenderNode(Node):
         
         # [위치/높이 파라미터]
         # 컵 탐색 초기 위치 (Z=359.12)
-        self.INITIAL_READY_POS = [367.47, 8.37, 359.12, 23.63, 179.98, 23.36]
-        self.CURRENT_Z_HEIGHT = 359.12 
+        self.INITIAL_READY_POS = [420.31, 125.52, 377.49, 81.10, -179.79, 80.59]
+        self.CURRENT_Z_HEIGHT = 377.49 
 
         # 컵 놓는 베이스 위치 (X, Y는 고정, Z는 가변)
         self.BASE_HOME_POS = [389.39, 21.52, 55.59, 10.74, -179.71, 10.58]
@@ -154,11 +154,15 @@ class BartenderNode(Node):
         # 병 탐색 위치
         self.BOTTLE_VIEW_POS = [-200.0, 600.0, 360.0, 0.0, -90.0, -90.0]
 
+        # [추가] 중간 경유지 (Base 좌표계)
+        self.INTERMEDIATE_WAYPOINT_POS_1 = [-142.91, 530.40, 692.69, 138.64, 82.57, 82.81]
+        self.INTERMEDIATE_WAYPOINT_POS_2 = [321.62, 318.62, 375.63, 85.71, 149.45, 56.19]
+
         # [추가] 병별 파라미터 (XY 보정, 접근 여유거리)
         # margin이 작을수록 병 쪽으로 더 많이 전진합니다.
         self.bottle_params = {
             "black_bottle": {"off_x": 0.0, "off_y": 0.0, "margin": 160.0},
-            "blue_bottle":  {"off_x": 5.0, "off_y": 0.0, "margin": 140.0},
+            "blue_bottle":  {"off_x": 5.0, "off_y": 0.0, "margin": 150.0},
             "default":      {"off_x": 0.0, "off_y": 0.0, "margin": 160.0}
         }
 
@@ -648,8 +652,10 @@ class BartenderNode(Node):
             
             # [수정] 병일 경우 현재 위치(Pick 좌표)를 저장한 뒤 상승
             if self.task_step == "bottle":
+                self.get_logger().warn("if: get_current_pose_and_lift 호출")
                 self.get_current_pose_and_lift()
             else:
+                self.get_logger().warn("else: lift_object 호출")
                 self.lift_object()
         else:
             self.get_logger().warn("❌ 접근(Approach) 실패 - 이동 불가")
@@ -759,7 +765,7 @@ class BartenderNode(Node):
         if self.task_step == "bottle":
             # [수정] get_current_pose 서비스 호출 지연 방지를 위해 고정 높이(220mm) 상대 상승
             self.get_logger().info("🍾 병 상승: 서비스 호출 없이 바로 상대 상승 (+220mm)")
-            self._lift_relative_z(220.0, next_cb=self.move_to_joint_home_before_pour)
+            self._lift_relative_z(220.0, next_cb=self.move_to_intermediate_waypoint_1_before_pour)
             return
 
         # 컵 작업 시 (Base Relative)
@@ -836,22 +842,28 @@ class BartenderNode(Node):
         req.vel = [100.0, 0.0]; req.acc = [100.0, 0.0]
         req.time = 2.0 # [추가] 속도 대신 시간을 지정하여 동작 생략 방지 (2초 동안 이동)
         req.ref = 0; req.mode = 1  # Base Relative
+        req.sync_type = 0 # [추가] 명시적 동기 모드 (동작 완료 후 리턴)
 
         f = self.move_line_client.call_async(req)
         f.add_done_callback(lambda fut: self._log_move_result(fut, "Lift(Base Z)"))
         if next_cb is not None:
-            # [수정] 서비스가 즉시 리턴되더라도 물리적인 시간(2.0초)을 보장하기 위해 Timer 사용
-            f.add_done_callback(lambda fut: self._wait_and_execute(fut, 2.0, next_cb))
+            # [수정] sync_type=0이므로 동작 완료 후 리턴됨. 추가 대기는 짧게 설정.
+            f.add_done_callback(lambda fut: self._wait_and_execute(fut, 0.1, next_cb))
 
     def _wait_and_execute(self, future, wait_time, next_cb):
         """서비스 응답 후 wait_time만큼 대기했다가 next_cb를 실행합니다."""
         try:
-            # 성공 여부와 관계없이(혹은 성공 시에만) 시간 지연 후 다음 동작
-            # future 결과를 next_cb에 전달하기 위해 args 사용
+            # [수정] 동작 실패 시 체인 중단 (성공 여부 확인)
+            if not future.result().success:
+                self.get_logger().error("❌ 동작 실패(MoveLine Fail). 다음 단계로 진행하지 않습니다.")
+                self.reset_state()
+                return
+
+            # 성공 시 시간 지연 후 다음 동작
             threading.Timer(wait_time + 0.1, next_cb, args=[future]).start()
         except Exception as e:
             self.get_logger().error(f"Timer Error: {e}")
-            next_cb(future)
+            self.reset_state()
 
     def _log_move_result(self, future, label: str):
         try:
@@ -1016,29 +1028,53 @@ class BartenderNode(Node):
     def go_to_pour_position(self, future):
         if future.result().success:
             self.status_msg = "Moving to Pour..."
-            # [수정] 컵 종류별 Base Z에 맞춰 붓기 Z만 보정합니다.
-            # 기준값(test_bottle.py): black_cup(Z=85)일 때
-            #   - pour_start Z=146.83  -> offset = +61.83
-            #   - pour_end   Z=168.70  -> offset = +83.70
-            # 추가 요구사항: 기존보다 약 +50mm 높은 위치에서 붓기
+            
+            # 1. 현재 컵 정보 및 Z 높이 확인
             cup_name = "black_cup"
             if self.current_recipe:
                 cup_name = self.current_recipe.get("cup", "black_cup")
             cup_z = float(self.cup_place_target_z.get(cup_name, 85.0))
 
-            base_ref_cup_z = 85.0
-            # [수정] Yellow Cup(Z=50) 실측 보정: 183.68 -> 126.98 (Diff: -56.7)
-            # 기존 pour_extra_z(50.0) - 56.7 = -6.7
-            pour_extra_z = -6.7
-            pour_start_z = cup_z + (146.83 - base_ref_cup_z) + pour_extra_z
-            pour_end_z = cup_z + (168.70 - base_ref_cup_z) + pour_extra_z
+            # 2. 병 종류에 따른 좌표 설정
+            # blue_bottle은 크기가 커서 별도 좌표 사용 (yellow_cup Z=50.0 기준)
+            if self.target_object == "blue_bottle":
+                ref_cup_z = 50.0
+                z_diff = cup_z - ref_cup_z
+                
+                if cup_name == "green_cup":
+                    z_diff += 50.0
+                elif cup_name == "black_cup":
+                    z_diff += 50.0
+                
+                # yellow_cup 기준 좌표 + Z 보정
+                self.pour_start_pos = [397.64, -81.31, 91.66 + z_diff, 30.86, -174.47, 27.07]
+                self.pour_end_pos   = [447.88, -51.92, 127.59 + z_diff, 104.87, -148.17, 67.24]
+                
+                self.get_logger().info(f"🍷 Blue Bottle Special Pour: Cup({cup_name}, Z={cup_z}) -> Z Offset={z_diff:.1f}")
+            
+            else:
+                # 기존 로직 (black_bottle, purple_bottle 등)
+                base_ref_cup_z = 85.0
+                # [수정] Yellow Cup(Z=50) 실측 보정: 183.68 -> 126.98 (Diff: -56.7)
+                # 기존 pour_extra_z(50.0) - 56.7 = -6.7
+                pour_extra_z = -6.7
+                
+                if cup_name == "green_cup":
+                    if self.target_object == "purple_bottle":
+                        pour_extra_z -= 50.0
+                    else:
+                        pour_extra_z += 50.0
 
-            self.pour_start_pos = [400.55, -41.65, float(pour_start_z), 33.90, -174.78, 29.70]
-            self.pour_end_pos = [429.46, -18.07, float(pour_end_z), 112.55, -140.10, 67.13]
+                pour_start_z = cup_z + (146.83 - base_ref_cup_z) + pour_extra_z
+                pour_end_z = cup_z + (168.70 - base_ref_cup_z) + pour_extra_z
 
-            self.get_logger().info(
-                f"🍷 붓기 Z 보정: Cup({cup_name}) Z={cup_z:.1f} -> Start Z={pour_start_z:.2f}, End Z={pour_end_z:.2f}"
-            )
+                self.pour_start_pos = [400.55, -41.65, float(pour_start_z), 33.90, -174.78, 29.70]
+                self.pour_end_pos = [429.46, -18.07, float(pour_end_z), 112.55, -140.10, 67.13]
+
+                self.get_logger().info(
+                    f"🍷 Standard Pour: Cup({cup_name}) Z={cup_z:.1f} -> Start Z={pour_start_z:.2f}, End Z={pour_end_z:.2f}"
+                )
+
             self.get_logger().info("🍷 붓기 위치로 이동 시작 (1. 상공 이동)")
             
             # [수정] 안전한 이동을 위해: 상공(Z=580)으로 먼저 수평 이동 후 하강
@@ -1104,8 +1140,68 @@ class BartenderNode(Node):
             req.vel = [60.0, 0.0]; req.acc = [60.0, 0.0]
             req.ref = 0; req.mode = 0
             f = self.move_line_client.call_async(req)
-            f.add_done_callback(self.place_bottle_back)
+            f.add_done_callback(self.move_to_intermediate_waypoint_2_after_pour)
         else: self.reset_state()
+
+    def move_to_intermediate_waypoint_1_before_pour(self, future):
+        if future.result().success:
+            self.status_msg = "Moving to Waypoint 1..."
+            self.get_logger().info("🍾 중간 경유지 1로 이동 (Before Pour)")
+            req = MoveLine.Request()
+            req.pos = self.INTERMEDIATE_WAYPOINT_POS_1
+            req.vel = [100.0, 0.0]; req.acc = [100.0, 0.0]
+            req.ref = 0; req.mode = 0 # Base Absolute
+            req.sync_type = 0
+            
+            f = self.move_line_client.call_async(req)
+            f.add_done_callback(self.move_to_intermediate_waypoint_2_before_pour)
+        else:
+            self.reset_state()
+
+    def move_to_intermediate_waypoint_2_before_pour(self, future):
+        if future.result().success:
+            self.status_msg = "Moving to Waypoint 2..."
+            self.get_logger().info("🍾 중간 경유지 2로 이동 (Before Pour)")
+            req = MoveLine.Request()
+            req.pos = self.INTERMEDIATE_WAYPOINT_POS_2
+            req.vel = [100.0, 0.0]; req.acc = [100.0, 0.0]
+            req.ref = 0; req.mode = 0 # Base Absolute
+            req.sync_type = 0
+            
+            f = self.move_line_client.call_async(req)
+            f.add_done_callback(self.go_to_pour_position)
+        else:
+            self.reset_state()
+
+    def move_to_intermediate_waypoint_2_after_pour(self, future):
+        if future.result().success:
+            self.status_msg = "Moving to Waypoint 2..."
+            self.get_logger().info("🍾 중간 경유지 2로 이동 (After Pour)")
+            req = MoveLine.Request()
+            req.pos = self.INTERMEDIATE_WAYPOINT_POS_2
+            req.vel = [100.0, 0.0]; req.acc = [100.0, 0.0]
+            req.ref = 0; req.mode = 0 # Base Absolute
+            req.sync_type = 0
+            
+            f = self.move_line_client.call_async(req)
+            f.add_done_callback(self.move_to_intermediate_waypoint_1_after_pour)
+        else:
+            self.reset_state()
+
+    def move_to_intermediate_waypoint_1_after_pour(self, future):
+        if future.result().success:
+            self.status_msg = "Moving to Waypoint 1..."
+            self.get_logger().info("🍾 중간 경유지 1로 이동 (After Pour)")
+            req = MoveLine.Request()
+            req.pos = self.INTERMEDIATE_WAYPOINT_POS_1
+            req.vel = [100.0, 0.0]; req.acc = [100.0, 0.0]
+            req.ref = 0; req.mode = 0 # Base Absolute
+            req.sync_type = 0
+            
+            f = self.move_line_client.call_async(req)
+            f.add_done_callback(self.place_bottle_back)
+        else:
+            self.reset_state()
 
     def place_bottle_back(self, future):
         if future.result().success:
