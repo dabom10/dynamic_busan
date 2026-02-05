@@ -53,7 +53,7 @@ class ShakeController(Node):
 
         # 파일 경로 설정
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        model_path = os.path.join(current_dir, 'best.pt')
+        model_path = os.path.join(current_dir, 'shake.pt')
         # 캘리브레이션 파일은 recipe 폴더에서 참조
         recipe_dir = os.path.join(os.path.dirname(current_dir), 'recipe')
         calib_path = os.path.join(recipe_dir, 'T_gripper2camera.npy')
@@ -74,21 +74,10 @@ class ShakeController(Node):
             self.get_logger().error(f"YOLO 모델 로드 실패: {e}")
             sys.exit(1)
 
-        # RealSense 초기화
-        self.pipeline = rs.pipeline()
-        config = rs.config()
-        config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-        config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-
-        try:
-            self.profile = self.pipeline.start(config)
-            depth_sensor = self.profile.get_device().first_depth_sensor()
-            self.depth_scale = depth_sensor.get_depth_scale()
-            self.align = rs.align(rs.stream.color)
-            self.get_logger().info("RealSense 초기화 완료")
-        except Exception as e:
-            self.get_logger().error(f"RealSense 에러: {e}")
-            sys.exit(1)
+        # RealSense (필요할 때만 열고 닫음)
+        self.pipeline = None
+        self.align = None
+        self.depth_scale = None
 
         # ROS 퍼블리셔/클라이언트
         self.pub_img = self.create_publisher(Image, '/shake/yolo_image', 10)
@@ -131,6 +120,27 @@ class ShakeController(Node):
 
         self.get_logger().info("Shake Action Server ready (shake/motion)")
 
+    def start_camera(self):
+        self.pipeline = rs.pipeline()
+        config = rs.config()
+        config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+        config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+        profile = self.pipeline.start(config)
+        depth_sensor = profile.get_device().first_depth_sensor()
+        self.depth_scale = depth_sensor.get_depth_scale()
+        self.align = rs.align(rs.stream.color)
+        self.get_logger().info("RealSense 시작")
+
+    def stop_camera(self):
+        if self.pipeline:
+            try:
+                self.pipeline.stop()
+            except Exception:
+                pass
+            self.pipeline = None
+            self.align = None
+            self.get_logger().info("RealSense 종료")
+
     def set_robot_tcp(self):
         if self.set_tool_client.wait_for_service(timeout_sec=1.0):
             req = SetCurrentTool.Request()
@@ -164,10 +174,13 @@ class ShakeController(Node):
 
             # 3. 객체 탐색 및 그립
             self.publish_feedback(goal_handle, feedback_msg, 30, "Shaker 탐색 중...")
+            self.start_camera()
             gripper.open_gripper()
             time.sleep(0.5)
 
             detection_result = self.detect_and_approach()
+            self.stop_camera()
+
             if not detection_result:
                 raise Exception("Shaker 탐색 실패")
 
@@ -223,6 +236,7 @@ class ShakeController(Node):
             result.total_time_ms = int((time.time() - start_time) * 1000)
 
         finally:
+            self.stop_camera()
             self.is_running = False
 
         return result
@@ -472,10 +486,7 @@ class ShakeController(Node):
         return future.result() and future.result().success
 
     def destroy_node(self):
-        try:
-            self.pipeline.stop()
-        except:
-            pass
+        self.stop_camera()
         cv2.destroyAllWindows()
         super().destroy_node()
 

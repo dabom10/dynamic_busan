@@ -3,7 +3,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
-import mariadb
+import pymysql
 import json
 from typing import Optional
 
@@ -27,7 +27,7 @@ class MariaDBNode(Node):
         self.db_name = self.get_parameter('db_name').value
 
         # MariaDB 연결
-        self.connection: Optional[mariadb.connections.Connection] = None
+        self.connection: Optional[pymysql.connections.Connection] = None
 
         # Publisher: DB 상태 발행
         self.status_pub = self.create_publisher(String, 'db_status', 10)
@@ -69,7 +69,7 @@ class MariaDBNode(Node):
     def connect_to_database(self):
         """MariaDB 데이터베이스에 연결"""
         try:
-            self.connection = mariadb.connect(
+            self.connection = pymysql.connect(
                 host=self.db_host,
                 port=self.db_port,
                 user=self.db_user,
@@ -224,9 +224,9 @@ class MariaDBNode(Node):
         if self.connection is None:
             return False
         try:
-            self.connection.ping()
+            self.connection.ping(reconnect=False)
             return True
-        except:
+        except Exception:
             return False
 
     def publish_status(self, status: str):

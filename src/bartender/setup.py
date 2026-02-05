@@ -14,6 +14,15 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
+    package_data={
+        package_name: [
+            'shake/*.pt',
+            'recipe/*.pt',
+            'recipe/*.json',
+            'recipe/*.npy',
+            'recipe/*.yaml',
+        ],
+    },
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='dorong',
