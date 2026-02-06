@@ -14,10 +14,11 @@ from typing import Optional, Callable
 class DBClient:
     """MariaDB 노드와 통신하기 위한 클라이언트 헬퍼 클래스"""
 
-    def __init__(self, node: Node):
+    def __init__(self, node: Node, callback_group=None):
         """
         Args:
             node: ROS2 Node 객체
+            callback_group: ROS2 CallbackGroup (옵션)
         """
         self.node = node
 
@@ -32,7 +33,8 @@ class DBClient:
             String,
             'db_query_response',
             self._query_response_callback,
-            10
+            10,
+            callback_group=callback_group
         )
 
         # Subscriber: DB 상태 구독
@@ -40,7 +42,8 @@ class DBClient:
             String,
             'db_status',
             self._status_callback,
-            10
+            10,
+            callback_group=callback_group
         )
 
         # Service Client: DB 연결 상태 확인

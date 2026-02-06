@@ -10,6 +10,10 @@ Supervisor Node - STT + 모션 시퀀스 통합 (Topping 없는 버전)
   - /manufacturing_done (pub): recovery_node에 제작 완료 신호
 
 """
+# Java heap size 증가 설정 (KoNLPy OutOfMemoryError 방지)
+import os
+os.environ['JAVA_TOOL_OPTIONS'] = '-Xmx2g'  # 2GB heap size
+
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
@@ -75,6 +79,13 @@ class SupervisorNode(Node):
             "블루 라군", "블루라군",
         ]
 
+        # 일반 음료 단어 (valid_menus에 없는 일반 음료는 무시)
+        self.common_beverage_words = [
+            "아메리카노", "라떼", "커피", "에스프레소", "카푸치노", "모카",
+            "마키아또", "카라멜", "바닐라", "녹차", "홍차", "밀크티",
+            "주스", "콜라", "사이다", "음료", "물", "생수"
+        ]
+
         # DB Client
         self.db_client = DBClient(self)
 
@@ -90,6 +101,11 @@ class SupervisorNode(Node):
         # 확인 단계 설정 (False로 바꾸면 확인 단계 생략)
         self.enable_confirmation = True
         self.confirmation_duration = 5  # 확인 응답 대기 시간 (초)
+
+        # KoNLPy Komoran 초기화 (재사용을 위해 한 번만 생성)
+        self.get_logger().info("Initializing Komoran...")
+        self.komoran = Komoran()
+        self.get_logger().info("Komoran initialized")
 
         # Wakeup
         self.mic = MicController.MicController()
@@ -125,22 +141,33 @@ class SupervisorNode(Node):
             sd.wait()
             self.get_logger().info("녹음 완료, STT 처리 중...")
 
+            # 메뉴 힌트 생성 (STT 정확도 향상)
+            menu_hint = ", ".join(set([m.replace(" ", "") for m in self.valid_menus]))
+            prompt = f"바텐더 음료 주문입니다. 가능한 메뉴: {menu_hint}"
+
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
                 wav.write(temp_wav.name, self.samplerate, audio)
                 with open(temp_wav.name, "rb") as f:
                     transcript = self.openai_client.audio.transcriptions.create(
-                        model="whisper-1",
+                        model="gpt-4o-mini-transcribe",
                         file=f,
+                        prompt=prompt,
+                        language="ko",
                     )
 
             line = transcript.text
             self.get_logger().info(f"STT 결과: {line}")
 
-            # 명사 추출
-            komoran = Komoran()
-            nouns = komoran.nouns(line)
+            # 명사 추출 (재사용)
+            nouns = self.komoran.nouns(line)
             stop_words = ['안녕', '이름', '잔']
-            filtered = [n for n in nouns if not any(word in n for word in stop_words)]
+
+            # 일반 음료 단어도 제거 (valid_menus에 없는 음료는 무시)
+            filtered = [
+                n for n in nouns
+                if not any(word in n for word in stop_words)
+                and n not in self.common_beverage_words
+            ]
 
             self.get_logger().info(f"명사: {nouns} → 필터: {filtered}")
 
@@ -156,10 +183,23 @@ class SupervisorNode(Node):
             for noun in filtered:
                 # 현재 명사가 메뉴에 포함되는지 확인
                 is_menu = False
+
+                # 1. 정확히 일치하는지 확인
                 for valid_menu in self.valid_menus:
                     if noun in valid_menu.replace(" ", ""):
                         is_menu = True
                         break
+
+                # 2. Fuzzy Matching (메뉴 단어들과 유사도 체크)
+                if not is_menu:
+                    menu_words = []
+                    for vm in self.valid_menus:
+                        menu_words.extend([w for w in vm.split() if w])
+
+                    matches = get_close_matches(noun, menu_words, n=1, cutoff=0.8)
+                    if matches:
+                        is_menu = True
+                        self.get_logger().info(f"🔍 명사 Fuzzy match: '{noun}' → '{matches[0]}'")
 
                 if is_menu:
                     menu_parts.append(noun)
@@ -170,6 +210,13 @@ class SupervisorNode(Node):
 
             name = "".join(name_parts)  # 공백 없이 결합 (예: "서동" + "찬" = "서동찬")
             menu = " ".join(menu_parts)  # 공백으로 결합 (예: "블루 사파이어")
+
+            # 이름 길이 검증 (한국 이름은 보통 2-4글자)
+            if len(name) < 2 or len(name) > 5:
+                self.get_logger().warn(f"⚠️  인식된 이름 '{name}'의 길이가 비정상적입니다 (2-5글자 권장).")
+                self.get_logger().warn("다시 말씀해주세요.")
+                self.is_running = False
+                return
 
             # 이름 저장 및 tracking에 전달
             self.current_customer = name
@@ -263,8 +310,10 @@ class SupervisorNode(Node):
                 wav.write(temp_wav.name, self.samplerate, audio)
                 with open(temp_wav.name, "rb") as f:
                     transcript = self.openai_client.audio.transcriptions.create(
-                        model="whisper-1",
+                        model="gpt-4o-mini-transcribe",
                         file=f,
+                        prompt="예 또는 아니요로 대답해주세요.",
+                        language="ko",
                     )
 
             response = transcript.text.lower()
@@ -299,20 +348,25 @@ class SupervisorNode(Node):
             sd.wait()
             self.get_logger().info("녹음 완료, STT 처리 중...")
 
+            # 메뉴 힌트 생성 (STT 정확도 향상)
+            menu_hint = ", ".join(set([m.replace(" ", "") for m in self.valid_menus]))
+            prompt = f"바텐더 음료 주문입니다. 가능한 메뉴: {menu_hint}"
+
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
                 wav.write(temp_wav.name, self.samplerate, audio)
                 with open(temp_wav.name, "rb") as f:
                     transcript = self.openai_client.audio.transcriptions.create(
-                        model="whisper-1",
+                        model="gpt-4o-mini-transcribe",
                         file=f,
+                        prompt=prompt,
+                        language="ko",
                     )
 
             line = transcript.text
             self.get_logger().info(f"STT 결과: {line}")
 
-            # 명사 추출 (메뉴만)
-            komoran = Komoran()
-            nouns = komoran.nouns(line)
+            # 명사 추출 (메뉴만, 재사용)
+            nouns = self.komoran.nouns(line)
             stop_words = ['안녕', '이름', '잔', '메뉴', '주문']
             filtered = [n for n in nouns if not any(word in n for word in stop_words)]
 
