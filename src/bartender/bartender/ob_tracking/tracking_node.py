@@ -44,9 +44,9 @@ from bartender_interfaces.srv import DrinkDelivery
 # 형식: [x, y, z, rx, ry, rz]
 # =============================================================================
 ZONE_POSITIONS = {
-    1: [436.33, -245.0, 56.0, 29.08, 180.0, 29.02],   # 구역1 (화면 왼쪽)
-    2: [318.21, -245.0, 56.0, 29.08, 180.0, 29.02],   # 구역2 (화면 중앙)
-    3: [208.26, -245.0, 56.0, 29.08, 180.0, 29.02],   # 구역3 (화면 오른쪽)
+    1: [660.0, -185.0, 160.0, 127.0, 180.0, 127.0],   # 구역1 (화면 왼쪽)
+    2: [330.0, -185.0, 160.0, 127.0, 180.0, 127.0],   # 구역2 (화면 중앙)
+    3: [-105.0, -185.0, 160.0, 127.0, 180.0, 127.0],   # 구역3 (화면 오른쪽)
 }
 ROBOT_ID = "dsr01"
 # =============================================================================
@@ -413,7 +413,7 @@ class PersonTrackingNode(Node):
         super().__init__('person_tracking_node', namespace=ROBOT_ID)
 
         # Parameters
-        self.declare_parameter('camera_id', 1)
+        self.declare_parameter('camera_id', 0)  # 로지텍 C270 웹캠 (video2)
         self.declare_parameter('confidence', 0.5)   # 신뢰도 임계값
         self.declare_parameter('lost_threshold', 60)
         self.declare_parameter('show_window', True)
@@ -459,7 +459,8 @@ class PersonTrackingNode(Node):
         # ---------------------------------------------------------------------
         # 웹캠 초기화
         # ---------------------------------------------------------------------
-        self.cap = cv2.VideoCapture(self.camera_id)
+        # V4L2 backend 명시 (GStreamer 에러 방지)
+        self.cap = cv2.VideoCapture(self.camera_id, cv2.CAP_V4L2)
         if not self.cap.isOpened():
             self.get_logger().error(f'웹캠을 열 수 없습니다: {self.camera_id}')
             raise RuntimeError(f'웹캠을 열 수 없습니다: {self.camera_id}')

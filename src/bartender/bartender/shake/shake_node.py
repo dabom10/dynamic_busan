@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-Shake Node - YOLO 객체인식 + 로봇 그립 + 쉐이킹 모션
+Shake Node - YOLO 객체인식 + 로봇 그립 + 쉐이킹 모션 + 음료 전달
+
+추가 기능:
+- DrinkDelivery 서비스로 tracking_node와 통신
+- 쉐이킹 완료 후 고객 위치로 음료 전달
 """
 import time
 import rclpy
@@ -10,6 +14,7 @@ from rclpy.action.server import ServerGoalHandle
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from bartender_interfaces.action import Motion
+from bartender_interfaces.srv import DrinkDelivery  # 서비스 통신용
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 import DR_init
@@ -49,7 +54,7 @@ except ImportError as e:
 class ShakeController(Node):
     def __init__(self):
         super().__init__("shake_node", namespace=ROBOT_ID)
-        self.get_logger().info("=== Shake Node (Vision + Motion) ===")
+        self.get_logger().info("=== Shake Node (Vision + Motion + Delivery) ===")
 
         # 파일 경로 설정
         current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -87,6 +92,12 @@ class ShakeController(Node):
         self.move_joint_client = self.create_client(MoveJoint, '/dsr01/motion/move_joint')
         self.get_pos_client = self.create_client(GetCurrentPos, '/dsr01/system/get_current_pose')
         self.set_tool_client = self.create_client(SetCurrentTool, '/dsr01/system/set_current_tool')
+
+        # ============================================================
+        # [DrinkDelivery 서비스 클라이언트] - tracking_node와 통신
+        # ============================================================
+        self.delivery_client = self.create_client(DrinkDelivery, 'get_pose')
+        self.get_logger().info("DrinkDelivery 서비스 클라이언트 생성 (get_pose)")
 
         # 서비스 대기
         if not self.move_line_client.wait_for_service(timeout_sec=2.0):
@@ -204,17 +215,26 @@ class ShakeController(Node):
                     raise Exception(f"쉐이킹 {i+1} 실패")
 
             # 7. 원위치 복귀
-            self.publish_feedback(goal_handle, feedback_msg, 90, "원위치 복귀")
+            self.publish_feedback(goal_handle, feedback_msg, 88, "원위치 복귀")
             if not self.return_shaker():
                 raise Exception("원위치 복귀 실패")
 
             # 8. 그리퍼 해제 및 후퇴
-            self.publish_feedback(goal_handle, feedback_msg, 95, "그리퍼 해제")
+            self.publish_feedback(goal_handle, feedback_msg, 92, "그리퍼 해제")
             gripper.open_gripper()
             time.sleep(0.5)
             self.retract(100.0)
 
-            # 9. 홈으로 복귀
+            # ============================================================
+            # [9. 음료 전달] - DrinkDelivery 서비스 호출
+            # ============================================================
+            self.publish_feedback(goal_handle, feedback_msg, 95, "고객 위치로 전달 중...")
+            delivery_success = self.send_delivery_request()
+
+            if not delivery_success:
+                self.get_logger().warn("⚠️ 음료 전달 실패. 홈으로 복귀합니다.")
+
+            # 10. 홈으로 복귀
             self.publish_feedback(goal_handle, feedback_msg, 100, "완료")
             self.move_to_joint(self.JOINT_HOME)
 
@@ -225,7 +245,7 @@ class ShakeController(Node):
             result.success = True
             result.message = f"Shake motion '{motion_name}' 완료"
             result.total_time_ms = elapsed_ms
-            self.get_logger().info(f"✅ 쉐이킹 완료: {elapsed_ms}ms")
+            self.get_logger().info(f"✅ 쉐이킹 및 전달 완료: {elapsed_ms}ms")
 
         except Exception as e:
             self.get_logger().error(f"❌ 쉐이킹 실패: {e}")
@@ -241,6 +261,63 @@ class ShakeController(Node):
 
         return result
 
+    # ============================================================
+    # [DrinkDelivery 서비스 요청] - tracking_node에서 고객 위치 수신
+    # ============================================================
+    def send_delivery_request(self):
+        """
+        음료 전달 요청 - tracking_node에서 고객 위치를 받아서 이동
+
+        Returns:
+            bool: 성공 여부
+        """
+        from DSR_ROBOT2 import movel, posx, movej
+
+        # 서비스 연결 확인
+        if not self.delivery_client.wait_for_service(timeout_sec=3.0):
+            self.get_logger().warn("⚠️ DrinkDelivery 서비스 연결 실패. 전달 건너뜀.")
+            return False
+
+        # 요청 생성
+        req = DrinkDelivery.Request()
+        req.finish = True  # 제작 완료 신호
+
+        self.get_logger().info("📤 DrinkDelivery 요청 전송...")
+
+        # 동기 호출 (응답 대기)
+        future = self.delivery_client.call_async(req)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
+
+        if not future.result():
+            self.get_logger().error("❌ DrinkDelivery 응답 없음")
+            return False
+
+        response = future.result()
+        pos = list(response.goal_position)
+
+        self.get_logger().info(f"📍 받은 고객 위치: {pos}")
+
+        # 위치가 없으면 종료
+        if len(pos) <= 0:
+            self.get_logger().warn("⚠️ 반환된 좌표가 없습니다")
+            return False
+
+        try:
+            # 홈 위치로 이동 (안전)
+            self.get_logger().info("🏠 홈 위치로 이동")
+            movej([0, 0, 90, 0, 90, 0], vel=60, acc=60)
+
+            # 고객 위치로 이동
+            self.get_logger().info(f"🚀 고객 위치로 이동: {pos}")
+            movel(posx(pos), vel=60, acc=60)
+
+            self.get_logger().info("✅ 음료 전달 완료")
+            return True
+
+        except Exception as e:
+            self.get_logger().error(f"❌ 음료 전달 중 에러: {e}")
+            return False
+
     def publish_feedback(self, goal_handle, feedback_msg, progress, step):
         feedback_msg.progress = progress
         feedback_msg.current_step = step
@@ -250,7 +327,7 @@ class ShakeController(Node):
     def detect_and_approach(self, timeout=10.0):
         """객체 탐색 및 접근"""
         start_time = time.time()
-
+        self.get_logger().info(f"객체 탐색 및 접근!!!")
         while time.time() - start_time < timeout:
             # 프레임 획득
             frames = self.pipeline.wait_for_frames(timeout_ms=2000)

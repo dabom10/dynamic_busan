@@ -25,7 +25,7 @@ from pathlib import Path
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, PythonExpression
-from launch.conditions import IfCondition, UnlessCondition
+from launch.conditions import IfCondition
 from launch_ros.actions import Node
 
 def generate_launch_description():
@@ -138,23 +138,24 @@ def generate_launch_description():
         emulate_tty=True,
     )
 
-    # Topping 노드 (with_topping=true일 때만 실행)
-    topping_node = Node(
-        package='bartender',
-        executable='topping_node',
-        name='topping_node',
-        output='screen',
-        emulate_tty=True,
-        condition=IfCondition(LaunchConfiguration('with_topping')),
-    )
+    # # Topping 노드 (with_topping=true일 때만 실행)
+    # topping_node = Node(
+    #     package='bartender',
+    #     executable='topping_node',
+    #     name='topping_node',
+    #     output='screen',
+    #     emulate_tty=True,
+    #     condition=IfCondition(LaunchConfiguration('with_topping')),
+    # )
 
-    # Tracking 노드 (사람 추적)
+    # Tracking 노드 (사람 추적, 로지텍 C270 웹캠 = video2)
     tracking_node = Node(
         package='bartender',
         executable='tracking',
         name='tracking_node',
         output='screen',
         emulate_tty=True,
+        parameters=[{'camera_id': 2}],  # 로지텍 C270 웹캠
     )
 
     # Recovery 노드 (복구 처리)
@@ -166,24 +167,13 @@ def generate_launch_description():
         emulate_tty=True,
     )
 
-    # Supervisor 노드 (topping 없음)
+    # Supervisor 노드 (항상 실행)
     supervisor_node = Node(
         package='bartender',
         executable='supervisor',
         name='supervisor_node',
         output='screen',
         emulate_tty=True,
-        condition=UnlessCondition(LaunchConfiguration('with_topping')),
-    )
-
-    # Supervisor Full 노드 (topping 포함)
-    supervisor_full_node = Node(
-        package='bartender',
-        executable='supervisor_full',
-        name='supervisor_node_full',
-        output='screen',
-        emulate_tty=True,
-        condition=IfCondition(LaunchConfiguration('with_topping')),
     )
 
     # =========================================================================
@@ -206,7 +196,6 @@ def generate_launch_description():
         recovery_node,
 
         # 조건부 노드들
-        topping_node,         # with_topping=true일 때만
-        supervisor_node,      # with_topping=false일 때
-        supervisor_full_node, # with_topping=true일 때
+        # topping_node,         # with_topping=true일 때만
+        supervisor_node,
     ])
