@@ -51,7 +51,7 @@ except ImportError as e:
 
 class BartenderNode(Node):
     def __init__(self):
-        super().__init__('bartender_cup_pick')
+        super().__init__('bartender_cup_pick', namespace='dsr01')
         self.get_logger().info("=== Bartender Bot (Fixed Version) ===")
 
         # 1. 파일 경로 설정

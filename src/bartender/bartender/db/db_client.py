@@ -22,16 +22,16 @@ class DBClient:
         """
         self.node = node
 
-        # Publisher: 쿼리 실행 요청 (fire and forget)
-        self.query_pub = self.node.create_publisher(String, 'db_query', 10)
+        # Publisher: 쿼리 실행 요청 (fire and forget) - 절대경로로 네임스페이스 무관하게 통신
+        self.query_pub = self.node.create_publisher(String, '/db_query', 10)
 
         # Publisher: 쿼리 실행 요청 (with response)
-        self.query_request_pub = self.node.create_publisher(String, 'db_query_request', 10)
+        self.query_request_pub = self.node.create_publisher(String, '/db_query_request', 10)
 
         # Subscriber: 쿼리 실행 결과 구독
         self.query_response_sub = self.node.create_subscription(
             String,
-            'db_query_response',
+            '/db_query_response',
             self._query_response_callback,
             10,
             callback_group=callback_group
@@ -40,7 +40,7 @@ class DBClient:
         # Subscriber: DB 상태 구독
         self.status_sub = self.node.create_subscription(
             String,
-            'db_status',
+            '/db_status',
             self._status_callback,
             10,
             callback_group=callback_group
@@ -49,7 +49,7 @@ class DBClient:
         # Service Client: DB 연결 상태 확인
         self.check_connection_client = self.node.create_client(
             Trigger,
-            'check_db_connection'
+            '/check_db_connection'
         )
 
         self.db_status = "unknown"

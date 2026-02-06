@@ -29,13 +29,13 @@ class MariaDBNode(Node):
         # MariaDB 연결
         self.connection: Optional[pymysql.connections.Connection] = None
 
-        # Publisher: DB 상태 발행
-        self.status_pub = self.create_publisher(String, 'db_status', 10)
+        # Publisher: DB 상태 발행 (절대경로)
+        self.status_pub = self.create_publisher(String, '/db_status', 10)
 
         # Subscriber: 쿼리 실행 요청 받기 (fire and forget)
         self.query_sub = self.create_subscription(
             String,
-            'db_query',
+            '/db_query',
             self.query_callback,
             10
         )
@@ -43,18 +43,18 @@ class MariaDBNode(Node):
         # Subscriber: 쿼리 실행 요청 받기 (with response)
         self.query_request_sub = self.create_subscription(
             String,
-            'db_query_request',
+            '/db_query_request',
             self.query_request_callback,
             10
         )
 
         # Publisher: 쿼리 실행 결과 발행
-        self.query_response_pub = self.create_publisher(String, 'db_query_response', 10)
+        self.query_response_pub = self.create_publisher(String, '/db_query_response', 10)
 
         # Service: DB 연결 상태 확인
         self.connection_check_srv = self.create_service(
             Trigger,
-            'check_db_connection',
+            '/check_db_connection',
             self.check_connection_callback
         )
 

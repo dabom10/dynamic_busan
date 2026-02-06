@@ -54,7 +54,7 @@ class SupervisorNode(Node):
 
         # ActionClient
         self._action_clients = {
-            'recipe': ActionClient(self, Motion, 'recipe/motion', callback_group=self._cb_group),
+            'recipe': ActionClient(self, Motion, '/dsr01/recipe/motion', callback_group=self._cb_group),
             'shake': ActionClient(self, Motion, '/dsr01/shake/motion', callback_group=self._cb_group),
         }
 
