@@ -26,10 +26,26 @@ tracking.py - ROS2 사람 추적 노드 (바텐더 연동 버전)
 """
 
 import time
+import os
+import glob as glob_module
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from ultralytics import YOLO
+
+
+def find_camera_by_name(keyword="C270"):
+    """카메라 이름으로 /dev/videoX 번호 자동 탐지"""
+    for device in sorted(glob_module.glob('/sys/class/video4linux/video*')):
+        name_file = os.path.join(device, 'name')
+        if os.path.exists(name_file):
+            with open(name_file, 'r') as f:
+                name = f.read().strip()
+            if keyword.lower() in name.lower():
+                video_num = int(os.path.basename(device).replace('video', ''))
+                print(f"[Camera] Found '{name}' at /dev/video{video_num}")
+                return video_num
+    return -1
 
 # ROS2 imports
 import rclpy
@@ -413,7 +429,7 @@ class PersonTrackingNode(Node):
         super().__init__('person_tracking_node', namespace=ROBOT_ID)
 
         # Parameters
-        self.declare_parameter('camera_id', 0)  # 로지텍 C270 웹캠 (video2)
+        self.declare_parameter('camera_id', 2)  # 로지텍 C270 웹캠 (video2)
         self.declare_parameter('confidence', 0.5)   # 신뢰도 임계값
         self.declare_parameter('lost_threshold', 60)
         self.declare_parameter('show_window', True)
@@ -457,9 +473,15 @@ class PersonTrackingNode(Node):
         self.PENDING_NAME_TIMEOUT = 2.0  # 대기 이름 타임아웃 (초)
 
         # ---------------------------------------------------------------------
-        # 웹캠 초기화
+        # 웹캠 초기화 (C270 자동 탐지)
         # ---------------------------------------------------------------------
-        # V4L2 backend 명시 (GStreamer 에러 방지)
+        auto_id = find_camera_by_name("C270")
+        if auto_id >= 0:
+            self.camera_id = auto_id
+            self.get_logger().info(f'C270 자동 탐지: /dev/video{auto_id}')
+        else:
+            self.get_logger().warn(f'C270 자동 탐지 실패, 파라미터 값 사용: {self.camera_id}')
+
         self.cap = cv2.VideoCapture(self.camera_id, cv2.CAP_V4L2)
         if not self.cap.isOpened():
             self.get_logger().error(f'웹캠을 열 수 없습니다: {self.camera_id}')
