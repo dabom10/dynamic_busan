@@ -71,8 +71,8 @@ class BartenderNode(Node):
         self._callback_group = ReentrantCallbackGroup()
         self.get_logger().info(f"🔧 ReentrantCallbackGroup 생성됨: {self._callback_group}")
         # DB 클라이언트 초기화 (callback_group 전달)
-        self.db_client = DBClient(self, callback_group=self._callback_group)
-        self.get_logger().info("✅ DBClient 초기화 완료 (callback_group 전달)")
+        self.db_client = DBClient(self)
+        self.get_logger().info("✅ DBClient 초기화 완료")
         self.db_query_event = threading.Event()
         self.db_query_result = []
 
@@ -180,7 +180,7 @@ class BartenderNode(Node):
         # margin이 작을수록 병 쪽으로 더 많이 전진합니다.
         self.bottle_params = {
             "black_bottle": {"off_x": 0.0, "off_y": 0.0, "margin": 160.0},
-            "blue_bottle":  {"off_x": 5.0, "off_y": 0.0, "margin": 150.0},
+            "blue_bottle":  {"off_x": 5.0, "off_y": 0.0, "margin": 140.0},
             "default":      {"off_x": 0.0, "off_y": 0.0, "margin": 160.0}
         }
 
@@ -189,14 +189,6 @@ class BartenderNode(Node):
             "green_cup": 145.0,
             "black_cup": 80.0,
             "yellow_cup": 50.0
-        }
-
-        # [임시] DB에 컵 정보가 없을 경우를 대비한 매핑 (메뉴명 -> 컵)
-        self.menu_cup_map = {
-            "Blue Sapphire": "black_cup",
-            "Tequila Sunrise": "green_cup",
-            "Purple Rain": "yellow_cup",
-            "default": "black_cup"
         }
 
         self.set_robot_tcp()
@@ -250,22 +242,9 @@ class BartenderNode(Node):
         self.get_logger().info(f"DB Query: {query.strip()}")
         self.db_client.execute_query_with_response(query, callback=self.on_db_response)
         
-        # 응답 대기 (명시적으로 executor spin - 콜백 처리)
-        import time
-        import rclpy
-        timeout = 5.0
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            # Executor를 명시적으로 spin해서 콜백 처리
-            rclpy.spin_once(self, timeout_sec=0.01)
-            if self.db_query_event.is_set():
-                self.get_logger().info("✅ DB 응답 수신 완료!")
-                return self.db_query_result
-            self.get_logger().error("DB Query Timeout")
-            return []
-
-        # 응답 대기 (최대 3초)
-        if self.db_query_event.wait(timeout=3.0):
+        # 응답 대기 (최대 5초)
+        if self.db_query_event.wait(timeout=5.0):
+            self.get_logger().info("✅ DB 응답 수신 완료!")
             return self.db_query_result
         else:
             self.get_logger().error("DB Query Timeout")
@@ -502,6 +481,15 @@ class BartenderNode(Node):
             # 5. 객체 탐색 로직
             if not self.is_moving and self.task_step in ["cup", "bottle"] and self.target_object:
                 boxes = results[0].boxes
+                
+                # [추가] 디버깅: 탐색 중인데 목표물이 안 보이면 로그 출력 (2초마다)
+                if len(boxes) == 0:
+                    self.get_logger().info(f"👀 탐색 중... 인식된 객체 없음 (목표: {self.target_object})", throttle_duration_sec=2.0)
+                else:
+                    detected_names = [self.model.names[int(b.cls[0])] for b in boxes]
+                    if self.target_object not in detected_names:
+                        self.get_logger().info(f"👀 탐색 중... 다른 객체만 보임: {detected_names} (목표: {self.target_object})", throttle_duration_sec=2.0)
+
                 for box in boxes:
                     cls_id = int(box.cls[0])
                     cls_name = self.model.names[cls_id]
@@ -539,6 +527,8 @@ class BartenderNode(Node):
                             cv2.putText(annotated_frame, f"Dist: {dist:.3f}m", (x1, y1-20), 
                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                             cv2.circle(annotated_frame, (cx, cy), 5, (0, 0, 255), -1)
+
+                        print(f"Detected object: {self.target_object}, Distance: {dist:.3f}m")
 
                         # 인식 범위 내 들어오면 이동 시작
                         if 0.1 < dist < 1.2:
@@ -618,6 +608,7 @@ class BartenderNode(Node):
         req.pos = [float(offset_x), float(offset_y), 0.0, 0.0, 0.0, 0.0] 
         req.vel = [100.0, 0.0]; req.acc = [100.0, 0.0]
         req.ref = 1; req.mode = 1
+        # req.sync_type = 1 # [수정] 동기 모드 명시 (이동 완료 후 콜백 실행)
         req.sync_type = 0 # [수정] 동기 모드 명시 (이동 완료 후 콜백 실행)
 
         future = self.move_line_client.call_async(req)
@@ -653,6 +644,7 @@ class BartenderNode(Node):
         req.pos = [0.0, 0.0, float(z_diff), 0.0, 0.0, 0.0]
         req.vel = [50.0, 0.0]; req.acc = [50.0, 0.0]
         req.ref = 0; req.mode = 1 
+        req.sync_type = 1 # [수정] 동기 모드 명시
         req.sync_type = 0 # [수정] 동기 모드 명시
         
         f = self.move_line_client.call_async(req)
@@ -684,6 +676,7 @@ class BartenderNode(Node):
             req.pos = [0.0, 0.0, float(dist), 0.0, 0.0, 0.0] # Tool Z축 전진
             req.vel = [50.0, 0.0]; req.acc = [50.0, 0.0]
             req.ref = 1; req.mode = 1 
+            req.sync_type = 1 # [수정] 동기 모드 명시
             req.sync_type = 0 # [수정] 동기 모드 명시
             
             f = self.move_line_client.call_async(req)
@@ -889,7 +882,7 @@ class BartenderNode(Node):
         req.vel = [100.0, 0.0]; req.acc = [100.0, 0.0]
         req.time = 2.0 # [추가] 속도 대신 시간을 지정하여 동작 생략 방지 (2초 동안 이동)
         req.ref = 0; req.mode = 1  # Base Relative
-        req.sync_type = 0 # [추가] 명시적 동기 모드 (동작 완료 후 리턴)
+        req.sync_type = 1 # [추가] 명시적 동기 모드 (동작 완료 후 리턴)
 
         f = self.move_line_client.call_async(req)
         f.add_done_callback(lambda fut: self._log_move_result(fut, "Lift(Base Z)"))
@@ -1280,7 +1273,7 @@ class BartenderNode(Node):
             req.pos = [float(x) for x in high_pos]
             req.vel = [100.0, 0.0]; req.acc = [100.0, 0.0]
             req.ref = 0; req.mode = 0
-            req.sync_type = 0 # [추가] 동기 모드(0)로 설정하여 이동 완료 대기 시도
+            req.sync_type = 1 # [추가] 동기 모드(1)로 설정하여 이동 완료 대기 시도
             f = self.move_line_client.call_async(req)
             
             # [수정] 이미 정확한 X,Y로 이동했으므로 align/approach 단계 건너뛰고 바로 하강
