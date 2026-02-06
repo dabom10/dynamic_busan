@@ -118,10 +118,6 @@ class BartenderNode(Node):
         self.set_tool_client = self.create_client(
         SetCurrentTool, '/dsr01/system/set_current_tool', callback_group=self._callback_group)
 
-        # Doosan ROS2 표준 서비스명은 get_current_pose 입니다. (get_current_pos 아님)
-        self.get_pos_client = self.create_client(GetCurrentPos, '/dsr01/system/get_current_pose')
-        self.set_tool_client = self.create_client(SetCurrentTool, '/dsr01/system/set_current_tool')
-
         if not self.move_line_client.wait_for_service(timeout_sec=2.0):
             self.get_logger().warn("⚠️ 로봇 서비스 연결 실패")
         if not self.io_client.wait_for_service(timeout_sec=2.0):
@@ -159,6 +155,7 @@ class BartenderNode(Node):
 
         self.status_msg = "Waiting..."
         self.is_moving = False
+        self.detected_pose = None
         
         # [위치/높이 파라미터]
         # 컵 탐색 초기 위치 (Z=359.12)
@@ -180,7 +177,7 @@ class BartenderNode(Node):
         # margin이 작을수록 병 쪽으로 더 많이 전진합니다.
         self.bottle_params = {
             "black_bottle": {"off_x": 0.0, "off_y": 0.0, "margin": 160.0},
-            "blue_bottle":  {"off_x": 5.0, "off_y": 0.0, "margin": 140.0},
+            "blue_bottle":  {"off_x": 5.0, "off_y": 0.0, "margin": 150.0},
             "default":      {"off_x": 0.0, "off_y": 0.0, "margin": 160.0}
         }
 
@@ -195,7 +192,7 @@ class BartenderNode(Node):
 
         self.input_thread = threading.Thread(target=self.user_input_loop, daemon=True)
         self.input_thread.start()
-        self.timer = self.create_timer(0.033, self.timer_callback)
+        # self.timer = self.create_timer(0.033, self.timer_callback)
 
     def abort_task(self, reason: str):
         """Stop current task safely and prevent vision loop from triggering motion."""
@@ -452,10 +449,10 @@ class BartenderNode(Node):
     def timer_callback(self):
         annotated_frame = None
         try:
-            # 1. 프레임 받기 (non-blocking)
-            frames = self.pipeline.poll_for_frames()
+            # 1. 프레임 받기 (blocking)
+            frames = self.pipeline.wait_for_frames(timeout_ms=1000)
             if not frames:
-                return  # 프레임 없으면 바로 리턴
+                return
 
             aligned_frames = self.align.process(frames)
             color_frame = aligned_frames.get_color_frame()
@@ -470,8 +467,12 @@ class BartenderNode(Node):
             intrinsics = color_frame.profile.as_video_stream_profile().intrinsics
 
             # 3. YOLO 추론
-            results = self.model(img, verbose=False)
-            annotated_frame = results[0].plot()
+            if not self.is_moving:
+                results = self.model(img, verbose=False)
+                annotated_frame = results[0].plot()
+            else:
+                results = None
+                annotated_frame = img.copy()
 
             # 4. 상태 메시지 표시
             cv2.rectangle(annotated_frame, (0, 0), (640, 60), (0, 0, 0), -1)
@@ -479,7 +480,7 @@ class BartenderNode(Node):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
             # 5. 객체 탐색 로직
-            if not self.is_moving and self.task_step in ["cup", "bottle"] and self.target_object:
+            if results and not self.is_moving and self.task_step in ["cup", "bottle"] and self.target_object:
                 boxes = results[0].boxes
                 
                 # [추가] 디버깅: 탐색 중인데 목표물이 안 보이면 로그 출력 (2초마다)
@@ -555,8 +556,9 @@ class BartenderNode(Node):
                                 f"tool=[{gx:.1f},{gy:.1f},{gz:.1f}]"
                             )
                             
-                            self.execute_eye_in_hand_move(gx, gy, gz)
-                            break 
+                            self.detected_pose = (gx, gy, gz)
+                            self.is_moving = True
+                            break
 
             # 6. 이미지 퍼블리시 및 출력
             try:
@@ -580,6 +582,12 @@ class BartenderNode(Node):
                 if cv2.waitKey(1) == 27: rclpy.shutdown()
 
     # --- 동작 로직 ---
+    def process_vision_signal(self):
+        if self.detected_pose is not None:
+            gx, gy, gz = self.detected_pose
+            self.detected_pose = None
+            self.execute_eye_in_hand_move(gx, gy, gz)
+
     def execute_eye_in_hand_move(self, offset_x, offset_y, offset_z):
         self.is_moving = True
         self.bottle_approach_dist = offset_z
@@ -1403,7 +1411,11 @@ def main(args=None):
     # [수정] Action Server(Blocking Callback)와 Service Callback 동시 처리를 위해 MultiThreadedExecutor 사용
     executor = MultiThreadedExecutor()
     executor.add_node(node)
-    try: executor.spin()
+    try:
+        while rclpy.ok():
+            executor.spin_once(timeout_sec=0.001)
+            node.timer_callback()
+            node.process_vision_signal()
     except KeyboardInterrupt: pass
     finally:
         node.destroy_node()
