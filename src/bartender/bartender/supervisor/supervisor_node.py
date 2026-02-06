@@ -32,11 +32,18 @@ import tempfile
 import os
 from dotenv import load_dotenv
 from konlpy.tag import Komoran
+
 from difflib import get_close_matches
+
 
 # wakeup
 from bartender.stt.wakeup import WakeupWord
 from bartender.stt import MicController
+
+# 기분 판정 위한 임포트 hugging face
+import torch
+from transformers import pipeline
+import random
 
 # .env 로드
 env_path = Path.home() / 'dynamic_busan' / '.env'
@@ -79,12 +86,17 @@ class SupervisorNode(Node):
             "블루 라군", "블루라군",
         ]
 
+
         # 일반 음료 단어 (valid_menus에 없는 일반 음료는 무시)
         self.common_beverage_words = [
             "아메리카노", "라떼", "커피", "에스프레소", "카푸치노", "모카",
             "마키아또", "카라멜", "바닐라", "녹차", "홍차", "밀크티",
             "주스", "콜라", "사이다", "음료", "물", "생수"
         ]
+
+        self.positive_menu=["테킬라 선라이즈","트로피컬 오션","블루 라군"]
+        self.negative_menu=["블루 사파이어","퍼플 레인","진 앤 토닉","화이트 마가리타"]
+
 
         # DB Client
         self.db_client = DBClient(self)
@@ -107,6 +119,14 @@ class SupervisorNode(Node):
         self.komoran = Komoran()
         self.get_logger().info("Komoran initialized")
 
+        # hugging face 기존 학습 모델 불러오기
+        self.get_logger().info("허깅 페이스 모델 로딩 중...")
+        self.sentiment = pipeline( 
+            'sentiment-analysis',
+            model='sangrimlee/bert-base-multilingual-cased-nsmc')
+        self.get_logger().info("모델 로딩 완료")
+        print()
+
         # Wakeup
         self.mic = MicController.MicController()
         self.mic.open_stream()
@@ -116,6 +136,12 @@ class SupervisorNode(Node):
         # Timer
         self.wakeup_timer = self.create_timer(0.5, self.check_wakeup)
         self.get_logger().info("Ready - Waiting for wakeup word...")
+
+    # positive/negative 기분 감지 함수
+    def detect_feel(self, text):
+        with torch.no_grad():
+            result = self.sentiment(text)
+            return result
 
     def check_wakeup(self):
         """Wakeup 감지"""
@@ -160,7 +186,9 @@ class SupervisorNode(Node):
 
             # 명사 추출 (재사용)
             nouns = self.komoran.nouns(line)
-            stop_words = ['안녕', '이름', '잔']
+
+            # 필요 없는 말 필터링
+            stop_words = ['안녕', '이름', '잔', '기분', '때', '것', '거', '추천', '우울', '축하', '행복']
 
             # 일반 음료 단어도 제거 (valid_menus에 없는 음료는 무시)
             filtered = [
@@ -209,7 +237,6 @@ class SupervisorNode(Node):
                         name_parts.append(noun)
 
             name = "".join(name_parts)  # 공백 없이 결합 (예: "서동" + "찬" = "서동찬")
-            menu = " ".join(menu_parts)  # 공백으로 결합 (예: "블루 사파이어")
 
             # 이름 길이 검증 (한국 이름은 보통 2-4글자)
             if len(name) < 2 or len(name) > 5:
@@ -217,6 +244,27 @@ class SupervisorNode(Node):
                 self.get_logger().warn("다시 말씀해주세요.")
                 self.is_running = False
                 return
+
+            #======================== 기분에 따른 메뉴 추천 ============================
+            if '추천' in nouns or '기분' in nouns:
+                
+                result = self.detect_feel(line)
+                label = result[0]['label']
+                score = result[0]['score']
+
+                if label == 'negative' and score > 0.6 :
+                    menu = random.choice(self.negative_menu)
+                    self.get_logger().info(f"(n) {menu} 를 추천 드립니다.")
+                elif label == 'positive' and score > 0.6 :
+                    menu = random.choice(self.positive_menu)
+                    self.get_logger().info(f"(p) {menu} 를 추천 드립니다.")
+                else:
+                    menu = ""
+            else:
+                # 일반 메뉴 주문 시 메뉴 변수 지정
+                menu = " ".join(menu_parts)  # 공백으로 결합 (예: "블루 사파이어")
+                self.get_logger().info(f"선택하신 메뉴 : {menu}")
+            #======================== 기분에 따른 메뉴 추천 ============================
 
             # 이름 저장 및 tracking에 전달
             self.current_customer = name
@@ -376,8 +424,28 @@ class SupervisorNode(Node):
                 self.get_logger().warn("메뉴 인식 실패. 처음부터 다시 시도해주세요.")
                 self.reset_state()
                 return
+            
+            #======================== 기분에 따른 메뉴 추천 ============================
+            if '추천' in filtered or '기분' in filtered:
+                
+                result = self.detect_feel(line)
+                label = result[0]['label']
+                score = result[0]['score']
 
-            menu = " ".join(filtered)
+                if label == 'negative' and score > 0.6 :
+                    menu = random.choice(self.negative_menu)
+                    self.get_logger().info(f"(n) {menu} 를 추천 드립니다.")
+                elif label == 'positive' and score > 0.6 :
+                    menu = random.choice(self.positive_menu)
+                    self.get_logger().info(f"(p) {menu} 를 추천 드립니다.")
+                else:
+                    menu = ""
+            else:
+                # 일반 메뉴 주문 시 메뉴 변수 지정
+                menu = " ".join(filtered)
+                self.get_logger().info(f"선택하신 메뉴 : {menu}")
+            #======================== 기분에 따른 메뉴 추천 ============================
+            
 
             # 메뉴 검증
             valid_menu = self.validate_menu(menu)
