@@ -155,7 +155,7 @@ def generate_launch_description():
         name='tracking_node',
         output='screen',
         emulate_tty=True,
-        parameters=[{'camera_id': 2}],  # 로지텍 C270 웹캠
+        parameters=[{'camera_id': 0}],  # 기본값 0 (C270은 코드에서 자동 탐지)
     )
 
     # Recovery 노드 (복구 처리)

@@ -429,7 +429,7 @@ class PersonTrackingNode(Node):
         super().__init__('person_tracking_node', namespace=ROBOT_ID)
 
         # Parameters
-        self.declare_parameter('camera_id', 2)  # 로지텍 C270 웹캠 (video2)
+        self.declare_parameter('camera_id', 0)  # 로지텍 C270 웹캠 (video2)
         self.declare_parameter('confidence', 0.5)   # 신뢰도 임계값
         self.declare_parameter('lost_threshold', 60)
         self.declare_parameter('show_window', True)
