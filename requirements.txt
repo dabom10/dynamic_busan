@@ -5,3 +5,5 @@ pyaudio
 konlpy
 pymysql
 pyrealsense2
+transformers
+torch
