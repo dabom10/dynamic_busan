@@ -205,9 +205,10 @@ class ShakeController(Node):
         """Action 실행 콜백"""
         motion_name = goal_handle.request.motion_name
         self.get_logger().info(f"🎯 Shake Goal 수신: {motion_name}")
+        self.get_logger().info(f"🔍 DEBUG: is_running = {self.is_running}")
 
         if self.is_running:
-            self.get_logger().warn("이미 실행 중입니다.")
+            self.get_logger().error(f"❌ 이미 실행 중입니다! (is_running={self.is_running})")
             goal_handle.abort()
             return Motion.Result(success=False, message="Already running")
 
@@ -305,8 +306,10 @@ class ShakeController(Node):
             result.total_time_ms = int((time.time() - start_time) * 1000)
 
         finally:
+            self.get_logger().info("🧹 Finally 블록 실행: 카메라 중지 및 is_running 초기화")
             self.stop_camera()
             self.is_running = False
+            self.get_logger().info(f"✅ is_running = {self.is_running} (초기화 완료)")
 
         return result
 

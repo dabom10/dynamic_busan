@@ -386,6 +386,7 @@ class SupervisorNode(Node):
                 return True
             else:
                 self.get_logger().warn("❌ 주문이 취소되었습니다.")
+                self.listen_for_menu_only()
                 return False
 
         except Exception as e:
@@ -506,7 +507,7 @@ class SupervisorNode(Node):
             self.pub_manufacturing_done.publish(done_msg)
             self.get_logger().info(f"[PUB] /manufacturing_done: {done_msg.data}")
 
-            self.reset_state()
+            self.reset_state(auto_restart=True)  # 자동으로 다음 주문 받기
             return
 
         motion = self.motion_sequence[self.current_index]
@@ -522,19 +523,29 @@ class SupervisorNode(Node):
             f"[{self.current_index + 1}/{len(self.motion_sequence)}] {motion['client']}: {action_name}"
         )
 
+        self.get_logger().info(f"🔍 DEBUG: Goal 생성 및 전송 시작...")
         goal = Motion.Goal()
         goal.motion_name = action_name
+        self.get_logger().info(f"📤 send_goal_async 호출...")
         future = client.send_goal_async(goal, feedback_callback=self.on_feedback)
+        self.get_logger().info(f"✅ send_goal_async 완료, 콜백 등록 중...")
         future.add_done_callback(self.on_goal_accepted)
+        self.get_logger().info(f"✅ 콜백 등록 완료")
 
     def on_goal_accepted(self, future):
         """Goal 수락"""
+        self.get_logger().info("📩 on_goal_accepted 콜백 호출됨")
         goal_handle = future.result()
+        self.get_logger().info(f"🔍 goal_handle.accepted = {goal_handle.accepted}")
+
         if not goal_handle.accepted:
             self.get_logger().error("❌ Goal rejected! Resetting...")
             self.reset_state()
             return
+
+        self.get_logger().info("✅ Goal accepted! get_result_async 호출...")
         goal_handle.get_result_async().add_done_callback(self.on_result)
+        self.get_logger().info("✅ Result 콜백 등록 완료")
 
     def on_feedback(self, feedback_msg):
         """Feedback"""
@@ -543,13 +554,19 @@ class SupervisorNode(Node):
 
     def on_result(self, future):
         """Result → 다음 실행"""
+        self.get_logger().info("🏁 on_result 콜백 호출됨")
         result = future.result().result
         self.get_logger().info(f"  Done: {result.message}")
         self.current_index += 1
+        self.get_logger().info(f"📍 다음 인덱스: {self.current_index}")
         self.execute_next()
 
-    def reset_state(self):
-        """상태 초기화"""
+    def reset_state(self, auto_restart=False):
+        """상태 초기화
+
+        Args:
+            auto_restart: True면 자동으로 다음 주문 받기 시작
+        """
         # 마이크 스트림 버퍼 비우기 (sd.rec 사용 후 PyAudio 버퍼 꼬임 방지)
         try:
             if self.mic.stream and self.mic.stream.is_active():
@@ -564,6 +581,12 @@ class SupervisorNode(Node):
         self.current_menu = None
         self.current_index = 0
         self.get_logger().info("Ready for next customer...")
+
+        # 자동 재시작 옵션
+        if auto_restart:
+            self.get_logger().info("🔄 자동으로 다음 주문 받기 시작...")
+            self.is_running = True
+            self.listen_and_process()
 
 
 def main(args=None):
