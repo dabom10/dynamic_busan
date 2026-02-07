@@ -131,8 +131,8 @@ class FailureRecoveryBot(Node):
         set_stiffnessx([100, 100, 50, 100, 100, 100])
         set_desired_force([0, 0, -30, 0, 0, 0], [0, 0, 5, 0, 0, 0], mod=DR_FC_MOD_REL)  
         while True:  
-            self.get_logger().info(f"힘 체크 : {get_tool_force()}")
-            self.get_logger().info("하강 중...")
+            # self.get_logger().info(f"힘 체크 : {get_tool_force()}")
+            # self.get_logger().info("하강 중...")
             if not check_force_condition(DR_AXIS_Z, min=10, max=100):
                 self.get_logger().info("병 바닥 닿음 감지!")
                 break
