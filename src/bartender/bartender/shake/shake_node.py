@@ -443,8 +443,8 @@ class ShakeController(Node):
             self.pub_img.publish(msg)
 
             # RGB 이미지에 YOLO 탐지 결과 표시 (cup_pick_node 방식)
-            cv2.imshow("Shake Vision", annotated_frame)
-            cv2.waitKey(1)
+            #cv2.imshow("Shake Vision", annotated_frame)
+            #cv2.waitKey(1)
 
             # 객체 탐지
             boxes = results[0].boxes

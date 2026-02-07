@@ -14,12 +14,10 @@ Supervisor Node - STT + 모션 시퀀스 통합 (Topping 없는 버전)
 import os
 os.environ['JAVA_TOOL_OPTIONS'] = '-Xmx2g'  # 2GB heap size
 
-import threading
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
 from pathlib import Path
 from std_msgs.msg import String
 
@@ -154,7 +152,7 @@ class SupervisorNode(Node):
         if self.wakeup.is_wakeup():
             self.get_logger().info("Wakeup detected!")
             self.is_running = True
-            threading.Thread(target=self.listen_and_process, daemon=True).start()
+            self.listen_and_process()
 
     def listen_and_process(self):
         """STT 처리"""
@@ -205,6 +203,7 @@ class SupervisorNode(Node):
             if not filtered:
                 self.get_logger().warn("이름 인식 실패. 다시 시도해주세요.")
                 self.is_running = False
+                self.listen_for_menu_only()
                 return
 
             # 메뉴를 먼저 찾고, 그 이전을 이름으로 처리
@@ -392,92 +391,93 @@ class SupervisorNode(Node):
             self.get_logger().error(f"확인 단계 에러: {e}")
             return False
 
-    def listen_for_menu_only(self, max_retry=3):
-        """메뉴만 다시 입력받기 (이름은 유지, 최대 max_retry회 재시도)"""
-        for attempt in range(max_retry):
-            try:
-                self.get_logger().info(f"메뉴를 다시 말해주세요 (5초)... [{attempt+1}/{max_retry}]")
+    def listen_for_menu_only(self):
+        """메뉴만 다시 입력받기 (이름은 유지)"""
+        try:
+            self.get_logger().info("메뉴를 다시 말해주세요 (5초)...")
 
-                audio = sd.rec(
-                    int(self.duration * self.samplerate),
-                    samplerate=self.samplerate,
-                    channels=1,
-                    dtype="int16",
-                )
-                sd.wait()
-                self.get_logger().info("녹음 완료, STT 처리 중...")
+            audio = sd.rec(
+                int(self.duration * self.samplerate),
+                samplerate=self.samplerate,
+                channels=1,
+                dtype="int16",
+            )
+            sd.wait()
+            self.get_logger().info("녹음 완료, STT 처리 중...")
 
-                # 메뉴 힌트 생성 (STT 정확도 향상)
-                menu_hint = ", ".join(set([m.replace(" ", "") for m in self.valid_menus]))
-                prompt = f"바텐더 음료 주문입니다. 가능한 메뉴: {menu_hint}"
+            # 메뉴 힌트 생성 (STT 정확도 향상)
+            menu_hint = ", ".join(set([m.replace(" ", "") for m in self.valid_menus]))
+            prompt = f"바텐더 음료 주문입니다. 가능한 메뉴: {menu_hint}"
 
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
-                    wav.write(temp_wav.name, self.samplerate, audio)
-                    with open(temp_wav.name, "rb") as f:
-                        transcript = self.openai_client.audio.transcriptions.create(
-                            model="gpt-4o-mini-transcribe",
-                            file=f,
-                            prompt=prompt,
-                            language="ko",
-                        )
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
+                wav.write(temp_wav.name, self.samplerate, audio)
+                with open(temp_wav.name, "rb") as f:
+                    transcript = self.openai_client.audio.transcriptions.create(
+                        model="gpt-4o-mini-transcribe",
+                        file=f,
+                        prompt=prompt,
+                        language="ko",
+                    )
 
-                line = transcript.text
-                self.get_logger().info(f"STT 결과: {line}")
+            line = transcript.text
+            self.get_logger().info(f"STT 결과: {line}")
 
-                # 명사 추출 (메뉴만, 재사용)
-                nouns = self.komoran.nouns(line)
-                stop_words = ['안녕', '이름', '잔', '메뉴', '주문']
-                filtered = [n for n in nouns if not any(word in n for word in stop_words)]
+            # 명사 추출 (메뉴만, 재사용)
+            nouns = self.komoran.nouns(line)
+            stop_words = ['안녕', '이름', '잔', '메뉴', '주문']
+            filtered = [n for n in nouns if not any(word in n for word in stop_words)]
 
-                if not filtered:
-                    self.get_logger().warn(f"메뉴 인식 실패. 재시도 {attempt+1}/{max_retry}")
-                    continue
+            #self.get_logger().info(f"명사: {nouns} → 필터: {filtered}")
 
-                #======================== 기분에 따른 메뉴 추천 ============================
-                if '추천' in filtered or '기분' in filtered:
+            if not filtered:
+                self.get_logger().warn("메뉴 인식 실패. 처음부터 다시 시도해주세요.")
+                self.reset_state()
+                return
+            
+            #======================== 기분에 따른 메뉴 추천 ============================
+            if '추천' in filtered or '기분' in filtered:
+                
+                result = self.detect_feel(line)
+                label = result[0]['label']
+                score = result[0]['score']
 
-                    result = self.detect_feel(line)
-                    label = result[0]['label']
-                    score = result[0]['score']
-
-                    if label == 'negative' and score > 0.6 :
-                        menu = random.choice(self.negative_menu)
-                        self.get_logger().info(f"(n) {menu} 를 추천 드립니다.")
-                    elif label == 'positive' and score > 0.6 :
-                        menu = random.choice(self.positive_menu)
-                        self.get_logger().info(f"(p) {menu} 를 추천 드립니다.")
-                    else:
-                        menu = ""
+                if label == 'negative' and score > 0.6 :
+                    menu = random.choice(self.negative_menu)
+                    self.get_logger().info(f"(n) {menu} 를 추천 드립니다.")
+                elif label == 'positive' and score > 0.6 :
+                    menu = random.choice(self.positive_menu)
+                    self.get_logger().info(f"(p) {menu} 를 추천 드립니다.")
                 else:
-                    # 일반 메뉴 주문 시 메뉴 변수 지정
-                    menu = " ".join(filtered)
-                    self.get_logger().info(f"선택하신 메뉴 : {menu}")
-                #======================== 기분에 따른 메뉴 추천 ============================
+                    menu = ""
+            else:
+                # 일반 메뉴 주문 시 메뉴 변수 지정
+                menu = " ".join(filtered)
+                self.get_logger().info(f"선택하신 메뉴 : {menu}")
+            #======================== 기분에 따른 메뉴 추천 ============================
+            
 
-                # 메뉴 검증
-                valid_menu = self.validate_menu(menu)
-                if valid_menu:
-                    # 확인 단계 (enable_confirmation이 True일 때만)
-                    if self.enable_confirmation:
-                        if not self.ask_confirmation(self.current_customer, valid_menu):
-                            self.get_logger().warn("❌ 다시 입력해주세요.")
-                            continue
+            # 메뉴 검증
+            valid_menu = self.validate_menu(menu)
+            if valid_menu:
+                # 확인 단계 (enable_confirmation이 True일 때만)
+                if self.enable_confirmation:
+                    if not self.ask_confirmation(self.current_customer, valid_menu):
+                        self.get_logger().warn("❌ 다시 입력해주세요.")
+                        self.listen_for_menu_only()
+                        return
 
-                    self.current_menu = valid_menu
-                    self.get_logger().info(f"=== 메뉴 확인: {valid_menu} ===")
-                    self.start_sequence()
-                    return
-                else:
-                    self.get_logger().warn(f"❌ '{menu}'은(는) 잘못된 메뉴입니다. 다시 말해주세요.")
-                    self.get_logger().info(f"📋 가능한 메뉴: {', '.join([m for m in self.valid_menus if ' ' in m])}")
-                    continue
+                self.current_menu = valid_menu
+                self.get_logger().info(f"=== 메뉴 확인: {valid_menu} ===")
+                self.start_sequence()
+            else:
+                self.get_logger().warn(f"❌ '{menu}'은(는) 잘못된 메뉴입니다. 다시 말해주세요.")
+                self.get_logger().info(f"📋 가능한 메뉴: {', '.join([m for m in self.valid_menus if ' ' in m])}")
+                # 재귀적으로 메뉴만 다시 받기
+                self.listen_for_menu_only()
 
-            except Exception as e:
-                self.get_logger().error(f"STT Error: {e}")
-                break
-
-        self.get_logger().error("메뉴 인식 실패. 처음부터 다시 시도해주세요.")
-        self.reset_state()
+        except Exception as e:
+            self.get_logger().error(f"STT Error: {e}")
+            self.reset_state()
 
     def start_sequence(self):
         """모션 시퀀스 시작"""
@@ -530,7 +530,8 @@ class SupervisorNode(Node):
         """Goal 수락"""
         goal_handle = future.result()
         if not goal_handle.accepted:
-            self.get_logger().error("Goal rejected!")
+            self.get_logger().error("❌ Goal rejected! Resetting...")
+            self.reset_state()
             return
         goal_handle.get_result_async().add_done_callback(self.on_result)
 
@@ -567,10 +568,8 @@ class SupervisorNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = SupervisorNode(OPENAI_API_KEY)
-    executor = MultiThreadedExecutor()
-    executor.add_node(node)
     try:
-        executor.spin()
+        rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
