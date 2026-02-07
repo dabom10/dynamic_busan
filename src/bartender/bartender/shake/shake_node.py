@@ -104,6 +104,7 @@ class ShakeController(Node):
             SetCurrentTool, '/dsr01/system/set_current_tool', callback_group=self._callback_group)
 
         self.delivery_client = self.create_client(DrinkDelivery, 'get_pose')
+        self.pub_cup_type = self.create_publisher(String, '/cup_type', 10)
 
         # Subscriber (current_menu 구독)
         self.sub_current_menu = self.create_subscription(
@@ -323,6 +324,10 @@ class ShakeController(Node):
 
         self.get_logger().info("📤 DrinkDelivery 요청 전송...")
 
+        cup_msg = String()
+        cup_msg.data = self.cup_type
+        self.pub_cup_type.publish(cup_msg)        
+
         # 동기 호출 (응답 대기)
         future = self.delivery_client.call_async(req)
         rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
@@ -350,7 +355,7 @@ class ShakeController(Node):
             self.get_logger().info(f"🚀 고객 위치로 이동: {pos}")
             movel(posx(pos), vel=60, acc=60)
             gripper.open_gripper()
-            time.sleep(5.0)
+            time.sleep(0.5)
 
             self.get_logger().info("✅ 음료 전달 완료")
             return True
@@ -636,6 +641,9 @@ class ShakeController(Node):
         self.get_logger().info(f"🔍 조회 메뉴==============================: {menu_name}")
         
         cup_type = self.fetch_cup_type_from_db(menu_name)
+
+        
+        
         if cup_type:
             self.cup_type = cup_type
             self.get_logger().info(f"✅ Cup Type 설정: {cup_type}")
