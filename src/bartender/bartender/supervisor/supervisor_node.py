@@ -245,6 +245,7 @@ class SupervisorNode(Node):
                 self.get_logger().warn(f"⚠️  인식된 이름 '{name}'의 길이가 비정상적입니다 (2-5글자 권장).")
                 self.get_logger().warn("다시 말씀해주세요.")
                 self.is_running = False
+                self.listen_for_menu_only()
                 return
 
             #======================== 기분에 따른 메뉴 추천 ============================
