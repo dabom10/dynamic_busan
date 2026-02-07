@@ -83,19 +83,10 @@ class BartenderNode(Node):
         except Exception:
             self.get_logger().error("YOLO 모델 로드 실패"); sys.exit(1)
 
-        # 3. RealSense 초기화
-        self.pipeline = rs.pipeline()
-        config = rs.config()
-        config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-        config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-
-        try:
-            self.profile = self.pipeline.start(config)
-            depth_sensor = self.profile.get_device().first_depth_sensor()
-            self.depth_scale = depth_sensor.get_depth_scale()
-            self.align = rs.align(rs.stream.color)
-        except Exception as e:
-            self.get_logger().error(f"RealSense 에러: {e}"); sys.exit(1)
+        # 3. RealSense (필요할 때만 열고 닫음)
+        self.pipeline = None
+        self.align = None
+        self.depth_scale = None
 
         # 4. ROS 클라이언트 설정
         self.pub_img = self.create_publisher(Image, '/yolo/image', 10)
@@ -289,8 +280,34 @@ class BartenderNode(Node):
 
             except: break
 
+    def start_camera(self):
+        """RealSense 카메라 시작"""
+        if self.pipeline is not None:
+            return
+        self.pipeline = rs.pipeline()
+        config = rs.config()
+        config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+        config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+        profile = self.pipeline.start(config)
+        depth_sensor = profile.get_device().first_depth_sensor()
+        self.depth_scale = depth_sensor.get_depth_scale()
+        self.align = rs.align(rs.stream.color)
+        self.get_logger().info("RealSense 시작")
+
+    def stop_camera(self):
+        """RealSense 카메라 종료"""
+        if self.pipeline:
+            try:
+                self.pipeline.stop()
+            except Exception:
+                pass
+            self.pipeline = None
+            self.align = None
+            self.get_logger().info("RealSense 종료")
+
     def process_order(self, menu_name):
         """주문 처리 로직 (CLI 및 Action 공용)"""
+        self.start_camera()
         # DB에서 레시피 조회
         db_rows = self.fetch_recipe_from_db(menu_name)
         
@@ -1375,6 +1392,8 @@ class BartenderNode(Node):
         req.vel = 50.0; req.acc = 30.0
         self.move_joint_client.call_async(req)
         
+        # RealSense 해제 (shake_node에서 사용할 수 있도록)
+        self.stop_camera()
         # Action 완료 이벤트 설정
         self.action_event.set()
         self.reset_state()
@@ -1386,8 +1405,7 @@ class BartenderNode(Node):
         if self.task_step == "idle": self.current_recipe = None
 
     def destroy_node(self):
-        try: self.pipeline.stop()
-        except: pass
+        self.stop_camera()
         cv2.destroyAllWindows()
         super().destroy_node()
 
