@@ -466,6 +466,10 @@ class BartenderNode(Node):
     def timer_callback(self):
         annotated_frame = None
         try:
+            # 카메라 파이프라인 확인
+            if self.pipeline is None:
+                return  # 카메라가 초기화되지 않았으면 조용히 리턴
+
             # 1. 프레임 받기 (blocking)
             frames = self.pipeline.wait_for_frames(timeout_ms=1000)
             if not frames:
@@ -1420,11 +1424,12 @@ def main(args=None):
 
     from DSR_ROBOT2 import get_tcp
 
-    if get_tcp() != ROBOT_TCP:
-        print(f"엔드이펙터 - Gripper 오류: {get_tcp()} != {ROBOT_TCP}")
-        node.destroy_node()
-        rclpy.shutdown()
-        return
+    current_tcp = get_tcp()
+    if current_tcp != ROBOT_TCP:
+        print(f"⚠️  TCP 불일치 경고: 현재={current_tcp}, 예상={ROBOT_TCP}")
+        print(f"⚠️  계속 실행합니다. 문제가 있으면 ROBOT_TCP를 '{current_tcp}'로 수정하세요.")
+    else:
+        print(f"✅ TCP 확인: {current_tcp}")
 
     # [수정] Action Server(Blocking Callback)와 Service Callback 동시 처리를 위해 MultiThreadedExecutor 사용
     executor = MultiThreadedExecutor()

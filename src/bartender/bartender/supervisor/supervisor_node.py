@@ -103,6 +103,7 @@ class SupervisorNode(Node):
 
         # Publishers (tracking, recovery 연동)
         self.pub_customer_name = self.create_publisher(String, '/customer_name', 10)
+        self.pub_current_menu = self.create_publisher(String, '/current_menu', 10)
         self.pub_manufacturing_done = self.create_publisher(String, '/manufacturing_done', 10)
 
         # OpenAI
@@ -197,7 +198,7 @@ class SupervisorNode(Node):
                 and n not in self.common_beverage_words
             ]
 
-            self.get_logger().info(f"명사: {nouns} → 필터: {filtered}")
+           # self.get_logger().info(f"명사: {nouns} → 필터: {filtered}")
 
             if not filtered:
                 self.get_logger().warn("이름 인식 실패. 다시 시도해주세요.")
@@ -291,6 +292,13 @@ class SupervisorNode(Node):
                         return
 
                 self.current_menu = valid_menu
+
+                # 메뉴 정보 퍼블리시
+                menu_msg = String()
+                menu_msg.data = valid_menu
+                self.pub_current_menu.publish(menu_msg)
+                self.get_logger().info(f"[PUB] /current_menu: {valid_menu}")
+
                 self.save_to_database(name, valid_menu)
                 self.get_logger().info(f"=== Order: {name}, Menu: {valid_menu} ===")
                 self.start_sequence()
@@ -418,7 +426,7 @@ class SupervisorNode(Node):
             stop_words = ['안녕', '이름', '잔', '메뉴', '주문']
             filtered = [n for n in nouns if not any(word in n for word in stop_words)]
 
-            self.get_logger().info(f"명사: {nouns} → 필터: {filtered}")
+            #self.get_logger().info(f"명사: {nouns} → 필터: {filtered}")
 
             if not filtered:
                 self.get_logger().warn("메뉴 인식 실패. 처음부터 다시 시도해주세요.")

@@ -10,7 +10,7 @@ def main():
     # 1. 설정 및 초기화
     # ---------------------------------------------------------
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    model_path = os.path.join(current_dir, 'best.pt')  # 같은 폴더의 best.pt 사용
+    model_path = os.path.join(current_dir, 'shake.pt')  # 같은 폴더의 best.pt 사용
     print(f"모델 로딩 중: {model_path}...")
     model = YOLO(model_path)
 
