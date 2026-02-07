@@ -55,7 +55,7 @@ class FailureRecoveryBot(Node):
         self.sub_disappeared = self.create_subscription(
             String, '/disappeared_customer_name', self.disappeared_cb, 10)
         self.sub_manufacturing = self.create_subscription(
-            String, '/manufacturing_done', self.start_mission_cb, 10)
+            String, '/cup_type', self.start_mission_cb, 10)
 
         self.get_logger().info('='*50)
         self.get_logger().info(f"M0609 복구 시스템 v5 (spin_once)")
