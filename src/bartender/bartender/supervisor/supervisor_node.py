@@ -547,6 +547,15 @@ class SupervisorNode(Node):
 
     def reset_state(self):
         """상태 초기화"""
+        # 마이크 스트림 버퍼 비우기 (sd.rec 사용 후 PyAudio 버퍼 꼬임 방지)
+        try:
+            if self.mic.stream and self.mic.stream.is_active():
+                available = self.mic.stream.get_read_available()
+                if available > 0:
+                    self.mic.stream.read(available, exception_on_overflow=False)
+        except Exception:
+            pass
+
         self.is_running = False
         self.current_customer = None
         self.current_menu = None
