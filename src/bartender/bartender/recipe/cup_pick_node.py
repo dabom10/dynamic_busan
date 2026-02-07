@@ -373,26 +373,16 @@ class BartenderNode(Node):
             self.current_goal_handle = None
             return Motion.Result(success=False, message="Recipe not found")
 
-        # 작업 완료 대기 (비동기 콜백 체인이 끝날 때까지)
-        # DB timeout 해결과 같은 방법: polling + spin_once로 콜백 처리
-        import time
-        timeout = 300.0  # 5분
-        start_time = time.time()
+        # 작업 완료 대기 (MultiThreadedExecutor가 콜백 처리)
+        completed = self.action_event.wait(timeout=300.0)
 
-        while time.time() - start_time < timeout:
-            rclpy.spin_once(self, timeout_sec=0.01)
-
-            if self.action_event.is_set():
-                self.get_logger().info("✅ 작업 완료!")
-                break
-
-            time.sleep(0.01)
-
-        if not self.action_event.is_set():
+        if not completed:
             self.get_logger().error("❌ Action Timeout (5분 초과)")
             goal_handle.abort()
             self.current_goal_handle = None
             return Motion.Result(success=False, message="Timeout")
+
+        self.get_logger().info("✅ 작업 완료!")
 
         self.current_goal_handle = None
         goal_handle.succeed()
