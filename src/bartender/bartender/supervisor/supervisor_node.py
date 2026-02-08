@@ -596,7 +596,7 @@ class SupervisorNode(Node):
             self.pub_manufacturing_done.publish(done_msg)
             self.get_logger().info(f"[PUB] /manufacturing_done: {done_msg.data}")
 
-            self.reset_state(auto_restart=True)  # 자동으로 다음 주문 받기
+            self.reset_state(auto_restart=True)  # wakeup word 대기 상태로 전환
             return
 
         motion = self.motion_sequence[self.current_index]
@@ -654,7 +654,7 @@ class SupervisorNode(Node):
         """상태 초기화
 
         Args:
-            auto_restart: True면 자동으로 다음 주문 받기 시작
+            auto_restart: True면 wakeup word 대기 상태로 전환 (다음 손님 대기)
             keep_customer: True면 고객 이름 유지 (메뉴 재입력용)
         """
         # 마이크 스트림 버퍼 비우기 (sd.rec 사용 후 PyAudio 버퍼 꼬임 방지)
@@ -671,11 +671,10 @@ class SupervisorNode(Node):
         self.current_index = 0
         
         # CRITICAL: wakeup 체크 재활성화 (지연 실행으로 안정화)
-        if not auto_restart:
-            # 즉시 재활성화하지 않고 약간의 딜레이 후 활성화
-            self.get_logger().info("🔓 Wakeup 체크 재활성화 준비 중...")
-            time.sleep(0.5)  # 0.5초 대기
-            self.clear_mic_buffer()  # 한 번 더 버퍼 클리어
+        # 즉시 재활성화하지 않고 약간의 딜레이 후 활성화
+        self.get_logger().info("🔓 Wakeup 체크 재활성화 준비 중...")
+        time.sleep(0.5)  # 0.5초 대기
+        self.clear_mic_buffer()  # 한 번 더 버퍼 클리어
         
         self.wakeup_enabled = True
         self.get_logger().info("🔓 Wakeup 체크 재활성화 완료")
@@ -683,13 +682,10 @@ class SupervisorNode(Node):
         if keep_customer:
             self.get_logger().info(f"Ready for menu input (Customer: {self.current_customer})...")
         else:
-            self.get_logger().info("Ready for next customer...")
-
-        # 자동 재시작 옵션
-        if auto_restart:
-            self.get_logger().info("🔄 자동으로 다음 주문 받기 시작...")
-            self.is_running = True
-            self.listen_and_process()
+            if auto_restart:
+                self.get_logger().info("🎤 다음 손님 대기 중... (Wakeup word를 말해주세요)")
+            else:
+                self.get_logger().info("Ready for next customer...")
 
 
 def main(args=None):
