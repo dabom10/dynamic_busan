@@ -283,11 +283,6 @@ class SupervisorNode(Node):
 
            # self.get_logger().info(f"명사: {nouns} → 필터: {filtered}")
 
-            if not filtered:
-                self.get_logger().warn("이름 인식 실패. 다시 시도해주세요.")
-                self.request_menu_retry()
-                return
-
             # 메뉴를 먼저 찾고, 그 이전을 이름으로 처리
             name_parts = []
             menu_parts = []
@@ -322,11 +317,23 @@ class SupervisorNode(Node):
 
             name = "".join(name_parts)  # 공백 없이 결합 (예: "서동" + "찬" = "서동찬")
 
+            if name == None or name == "":
+                self.reset_state()
+                self.check_wakeup()
+                self.get_logger().info("Hello rokey를 말해주세요")
+                return
+
+            if not filtered:
+                self.get_logger().warn("이름 인식 실패. 다시 시도해주세요.")
+                self.request_menu_retry()
+                return
+
             # 이름 길이 검증 (한국 이름은 보통 2-4글자)
             if len(name) < 2 or len(name) > 5:
                 self.get_logger().warn(f"⚠️  인식된 이름 '{name}'의 길이가 비정상적입니다 (2-5글자 권장).")
                 self.get_logger().warn("다시 말씀해주세요.")
-                self.request_menu_retry()
+                self.reset_state()
+                self.check_wakeup()
                 return
 
             #======================== 기분에 따른 메뉴 추천 ============================
@@ -350,11 +357,9 @@ class SupervisorNode(Node):
                 self.get_logger().info(f"선택하신 메뉴 : {menu}")
             #======================== 기분에 따른 메뉴 추천 ============================
 
-            if name == None:
-                self.check_wakeup()
-
             # 이름 저장 및 tracking에 전달
             self.current_customer = name
+            self.get_logger().warn(f"self.current_customer :::: {self.current_customer}")
             name_msg = String()
             name_msg.data = name
             self.pub_customer_name.publish(name_msg)
@@ -549,7 +554,6 @@ class SupervisorNode(Node):
                 self.get_logger().info(f"선택하신 메뉴 : {menu}")
             #======================== 기분에 따른 메뉴 추천 ============================
             
-
             # 메뉴 검증
             valid_menu = self.validate_menu(menu)
             if valid_menu:
