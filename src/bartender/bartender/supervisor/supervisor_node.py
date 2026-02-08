@@ -350,6 +350,9 @@ class SupervisorNode(Node):
                 self.get_logger().info(f"선택하신 메뉴 : {menu}")
             #======================== 기분에 따른 메뉴 추천 ============================
 
+            if name == None:
+                self.check_wakeup()
+
             # 이름 저장 및 tracking에 전달
             self.current_customer = name
             name_msg = String()
