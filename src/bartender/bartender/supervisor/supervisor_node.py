@@ -80,7 +80,7 @@ class SupervisorNode(Node):
             "블루 사파이어", "블루사파이어",
             "테킬라 선라이즈", "테킬라선라이즈",
             "퍼플 레인", "퍼플레인",
-            "진 앤 토닉", "진앤토닉",
+            "진 토닉", "진토닉",
             "트로피컬 오션", "트로피컬오션",
             "화이트 마가리타", "화이트마가리타",
             "블루 라군", "블루라군",
@@ -203,8 +203,7 @@ class SupervisorNode(Node):
             if not filtered:
                 self.get_logger().warn("이름 인식 실패. 다시 시도해주세요.")
                 self.is_running = False
-                # self.listen_for_menu_only()
-                self.listen_and_process()
+                self.listen_for_menu_only()
                 return
 
             # 메뉴를 먼저 찾고, 그 이전을 이름으로 처리
@@ -246,7 +245,7 @@ class SupervisorNode(Node):
                 self.get_logger().warn(f"⚠️  인식된 이름 '{name}'의 길이가 비정상적입니다 (2-5글자 권장).")
                 self.get_logger().warn("다시 말씀해주세요.")
                 self.is_running = False
-                self.listen_and_process()
+                self.listen_for_menu_only()
                 return
 
             #======================== 기분에 따른 메뉴 추천 ============================
@@ -291,7 +290,7 @@ class SupervisorNode(Node):
                 if self.enable_confirmation:
                     if not self.ask_confirmation(name, valid_menu):
                         self.get_logger().warn("❌ 다시 입력해주세요.")
-                        self.listen_and_process()
+                        self.listen_for_menu_only()
                         return
 
                 self.current_menu = valid_menu
