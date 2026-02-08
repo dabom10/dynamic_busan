@@ -72,7 +72,6 @@ class SupervisorNode(Node):
         ]
         self.current_index = 0
         self.is_running = False
-        self._auto_restart_pending = False  # 사이클 완료 후 자동 재시작 플래그
         self.current_customer = None
         self.current_menu = None  # 현재 주문 메뉴 (cup_pick에 전달)
 
@@ -146,16 +145,8 @@ class SupervisorNode(Node):
             return result
 
     def check_wakeup(self):
-        """Wakeup 감지 + 자동 재시작 처리"""
+        """Wakeup 감지"""
         if self.is_running:
-            return
-
-        # 자동 재시작 플래그 확인 (on_result 콜백에서 설정됨)
-        if self._auto_restart_pending:
-            self._auto_restart_pending = False
-            self.get_logger().info("자동으로 다음 주문 받기 시작...")
-            self.is_running = True
-            self.listen_and_process()
             return
 
         if self.wakeup.is_wakeup():
@@ -164,154 +155,164 @@ class SupervisorNode(Node):
             self.listen_and_process()
 
     def listen_and_process(self):
-        """STT 처리 (while 루프 - 재귀 호출 없음)"""
-        while True:
-            try:
-                self.get_logger().info("5초 동안 말해주세요...")
+        """STT 처리"""
+        try:
+            self.get_logger().info("5초 동안 말해주세요...")
 
-                audio = sd.rec(
-                    int(self.duration * self.samplerate),
-                    samplerate=self.samplerate,
-                    channels=1,
-                    dtype="int16",
-                )
-                sd.wait()
-                self.get_logger().info("녹음 완료, STT 처리 중...")
+            audio = sd.rec(
+                int(self.duration * self.samplerate),
+                samplerate=self.samplerate,
+                channels=1,
+                dtype="int16",
+            )
+            sd.wait()
+            self.get_logger().info("녹음 완료, STT 처리 중...")
 
-                # 메뉴 힌트 생성 (STT 정확도 향상)
-                menu_hint = ", ".join(set([m.replace(" ", "") for m in self.valid_menus]))
-                prompt = f"바텐더 음료 주문입니다. 가능한 메뉴: {menu_hint}"
+            # 메뉴 힌트 생성 (STT 정확도 향상)
+            menu_hint = ", ".join(set([m.replace(" ", "") for m in self.valid_menus]))
+            prompt = f"바텐더 음료 주문입니다. 가능한 메뉴: {menu_hint}"
 
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
-                    wav.write(temp_wav.name, self.samplerate, audio)
-                    with open(temp_wav.name, "rb") as f:
-                        transcript = self.openai_client.audio.transcriptions.create(
-                            model="gpt-4o-mini-transcribe",
-                            file=f,
-                            prompt=prompt,
-                            language="ko",
-                        )
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
+                wav.write(temp_wav.name, self.samplerate, audio)
+                with open(temp_wav.name, "rb") as f:
+                    transcript = self.openai_client.audio.transcriptions.create(
+                        model="gpt-4o-mini-transcribe",
+                        file=f,
+                        prompt=prompt,
+                        language="ko",
+                    )
 
-                line = transcript.text
-                self.get_logger().info(f"STT 결과: {line}")
+            line = transcript.text
+            self.get_logger().info(f"STT 결과: {line}")
 
-                # 명사 추출 (재사용)
-                nouns = self.komoran.nouns(line)
+            # 명사 추출 (재사용)
+            nouns = self.komoran.nouns(line)
 
-                # 필요 없는 말 필터링
-                stop_words = ['안녕', '이름', '잔', '기분', '때', '것', '거', '추천', '우울', '축하', '행복']
+            # 필요 없는 말 필터링
+            stop_words = ['안녕', '이름', '잔', '기분', '때', '것', '거', '추천', '우울', '축하', '행복']
 
-                # 일반 음료 단어도 제거 (valid_menus에 없는 음료는 무시)
-                filtered = [
-                    n for n in nouns
-                    if not any(word in n for word in stop_words)
-                    and n not in self.common_beverage_words
-                ]
+            # 일반 음료 단어도 제거 (valid_menus에 없는 음료는 무시)
+            filtered = [
+                n for n in nouns
+                if not any(word in n for word in stop_words)
+                and n not in self.common_beverage_words
+            ]
 
-                if not filtered:
-                    self.get_logger().warn("이름 인식 실패. 다시 시도해주세요.")
-                    continue  # while 루프 처음으로 (재귀 X)
+           # self.get_logger().info(f"명사: {nouns} → 필터: {filtered}")
 
-                # 메뉴를 먼저 찾고, 그 이전을 이름으로 처리
-                name_parts = []
-                menu_parts = []
-
-                for noun in filtered:
-                    is_menu = False
-
-                    for valid_menu in self.valid_menus:
-                        if noun in valid_menu.replace(" ", ""):
-                            is_menu = True
-                            break
-
-                    if not is_menu:
-                        menu_words = []
-                        for vm in self.valid_menus:
-                            menu_words.extend([w for w in vm.split() if w])
-
-                        matches = get_close_matches(noun, menu_words, n=1, cutoff=0.8)
-                        if matches:
-                            is_menu = True
-                            self.get_logger().info(f"명사 Fuzzy match: '{noun}' → '{matches[0]}'")
-
-                    if is_menu:
-                        menu_parts.append(noun)
-                    else:
-                        if not menu_parts:
-                            name_parts.append(noun)
-
-                name = "".join(name_parts)
-
-                # 이름 길이 검증 (한국 이름은 보통 2-4글자)
-                if len(name) < 2 or len(name) > 5:
-                    self.get_logger().warn(f"인식된 이름 '{name}'의 길이가 비정상적입니다 (2-5글자 권장).")
-                    self.get_logger().warn("다시 말씀해주세요.")
-                    continue  # while 루프 처음으로 (재귀 X)
-
-                #======================== 기분에 따른 메뉴 추천 ============================
-                if '추천' in nouns or '기분' in nouns:
-                    result = self.detect_feel(line)
-                    label = result[0]['label']
-                    score = result[0]['score']
-
-                    if label == 'negative' and score > 0.6:
-                        menu = random.choice(self.negative_menu)
-                        self.get_logger().info(f"(n) {menu} 를 추천 드립니다.")
-                    elif label == 'positive' and score > 0.6:
-                        menu = random.choice(self.positive_menu)
-                        self.get_logger().info(f"(p) {menu} 를 추천 드립니다.")
-                    else:
-                        menu = ""
-                else:
-                    menu = " ".join(menu_parts)
-                    self.get_logger().info(f"선택하신 메뉴 : {menu}")
-                #======================== 기분에 따른 메뉴 추천 ============================
-
-                # 이름 저장 및 tracking에 전달
-                self.current_customer = name
-                name_msg = String()
-                name_msg.data = name
-                self.pub_customer_name.publish(name_msg)
-                self.get_logger().info(f"[PUB] /customer_name: {name}")
-
-                # 메뉴가 없으면 메뉴만 다시 받기
-                if not menu:
-                    self.get_logger().warn(f"이름 '{name}'은(는) 확인되었습니다. 메뉴를 말해주세요.")
-                    self.get_logger().info(f"가능한 메뉴: {', '.join([m for m in self.valid_menus if ' ' in m])}")
-                    self.listen_for_menu_only()
-                    return
-
-                # 메뉴 검증
-                valid_menu = self.validate_menu(menu)
-                if valid_menu:
-                    # 확인 단계 (enable_confirmation이 True일 때만)
-                    if self.enable_confirmation:
-                        if not self.ask_confirmation(name, valid_menu):
-                            self.get_logger().warn("다시 입력해주세요.")
-                            continue  # while 루프 처음으로 (재귀 X)
-
-                    self.current_menu = valid_menu
-
-                    # 메뉴 정보 퍼블리시
-                    menu_msg = String()
-                    menu_msg.data = valid_menu
-                    self.pub_current_menu.publish(menu_msg)
-                    self.get_logger().info(f"[PUB] /current_menu: {valid_menu}")
-
-                    self.save_to_database(name, valid_menu)
-                    self.get_logger().info(f"=== Order: {name}, Menu: {valid_menu} ===")
-                    self.start_sequence()
-                    return  # 시퀀스 시작 후 루프 종료
-                else:
-                    self.get_logger().warn(f"'{menu}'은(는) 잘못된 메뉴입니다. 다시 말해주세요.")
-                    self.get_logger().info(f"가능한 메뉴: {', '.join([m for m in self.valid_menus if ' ' in m])}")
-                    self.listen_for_menu_only()
-                    return
-
-            except Exception as e:
-                self.get_logger().error(f"STT Error: {e}")
+            if not filtered:
+                self.get_logger().warn("이름 인식 실패. 다시 시도해주세요.")
                 self.is_running = False
+                # self.listen_for_menu_only()
+                self.listen_and_process()
                 return
+
+            # 메뉴를 먼저 찾고, 그 이전을 이름으로 처리
+            name_parts = []
+            menu_parts = []
+
+            for noun in filtered:
+                # 현재 명사가 메뉴에 포함되는지 확인
+                is_menu = False
+
+                # 1. 정확히 일치하는지 확인
+                for valid_menu in self.valid_menus:
+                    if noun in valid_menu.replace(" ", ""):
+                        is_menu = True
+                        break
+
+                # 2. Fuzzy Matching (메뉴 단어들과 유사도 체크)
+                if not is_menu:
+                    menu_words = []
+                    for vm in self.valid_menus:
+                        menu_words.extend([w for w in vm.split() if w])
+
+                    matches = get_close_matches(noun, menu_words, n=1, cutoff=0.8)
+                    if matches:
+                        is_menu = True
+                        self.get_logger().info(f"🔍 명사 Fuzzy match: '{noun}' → '{matches[0]}'")
+
+                if is_menu:
+                    menu_parts.append(noun)
+                else:
+                    # 메뉴가 아직 안 나왔으면 이름에 추가
+                    if not menu_parts:
+                        name_parts.append(noun)
+
+            name = "".join(name_parts)  # 공백 없이 결합 (예: "서동" + "찬" = "서동찬")
+
+            # 이름 길이 검증 (한국 이름은 보통 2-4글자)
+            if len(name) < 2 or len(name) > 5:
+                self.get_logger().warn(f"⚠️  인식된 이름 '{name}'의 길이가 비정상적입니다 (2-5글자 권장).")
+                self.get_logger().warn("다시 말씀해주세요.")
+                self.is_running = False
+                self.listen_and_process()
+                return
+
+            #======================== 기분에 따른 메뉴 추천 ============================
+            if '추천' in nouns or '기분' in nouns:
+                
+                result = self.detect_feel(line)
+                label = result[0]['label']
+                score = result[0]['score']
+
+                if label == 'negative' and score > 0.6 :
+                    menu = random.choice(self.negative_menu)
+                    self.get_logger().info(f"(n) {menu} 를 추천 드립니다.")
+                elif label == 'positive' and score > 0.6 :
+                    menu = random.choice(self.positive_menu)
+                    self.get_logger().info(f"(p) {menu} 를 추천 드립니다.")
+                else:
+                    menu = ""
+            else:
+                # 일반 메뉴 주문 시 메뉴 변수 지정
+                menu = " ".join(menu_parts)  # 공백으로 결합 (예: "블루 사파이어")
+                self.get_logger().info(f"선택하신 메뉴 : {menu}")
+            #======================== 기분에 따른 메뉴 추천 ============================
+
+            # 이름 저장 및 tracking에 전달
+            self.current_customer = name
+            name_msg = String()
+            name_msg.data = name
+            self.pub_customer_name.publish(name_msg)
+            self.get_logger().info(f"[PUB] /customer_name: {name}")
+
+            # 메뉴가 없으면 메뉴만 다시 받기
+            if not menu:
+                self.get_logger().warn(f"이름 '{name}'은(는) 확인되었습니다. 메뉴를 말해주세요.")
+                self.get_logger().info(f"📋 가능한 메뉴: {', '.join([m for m in self.valid_menus if ' ' in m])}")
+                self.listen_for_menu_only()
+                return
+
+            # 메뉴 검증
+            valid_menu = self.validate_menu(menu)
+            if valid_menu:
+                # 확인 단계 (enable_confirmation이 True일 때만)
+                if self.enable_confirmation:
+                    if not self.ask_confirmation(name, valid_menu):
+                        self.get_logger().warn("❌ 다시 입력해주세요.")
+                        self.listen_and_process()
+                        return
+
+                self.current_menu = valid_menu
+
+                # 메뉴 정보 퍼블리시
+                menu_msg = String()
+                menu_msg.data = valid_menu
+                self.pub_current_menu.publish(menu_msg)
+                self.get_logger().info(f"[PUB] /current_menu: {valid_menu}")
+
+                self.save_to_database(name, valid_menu)
+                self.get_logger().info(f"=== Order: {name}, Menu: {valid_menu} ===")
+                self.start_sequence()
+            else:
+                self.get_logger().warn(f"❌ '{menu}'은(는) 잘못된 메뉴입니다. 다시 말해주세요.")
+                self.get_logger().info(f"📋 가능한 메뉴: {', '.join([m for m in self.valid_menus if ' ' in m])}")
+                self.listen_for_menu_only()
+
+        except Exception as e:
+            self.get_logger().error(f"STT Error: {e}")
+            self.is_running = False
 
     def save_to_database(self, name: str, menu: str):
         """DB 저장"""
@@ -382,95 +383,104 @@ class SupervisorNode(Node):
             is_positive = any(word in response for word in positive_words)
 
             if is_positive:
-                self.get_logger().info("주문이 확인되었습니다!")
+                self.get_logger().info("✅ 주문이 확인되었습니다!")
                 return True
             else:
-                self.get_logger().warn("주문이 취소되었습니다.")
-                return False  # 호출한 쪽의 while 루프에서 continue로 재시도
+                self.get_logger().warn("❌ 주문이 취소되었습니다.")
+                self.listen_for_menu_only()
+                return False
 
         except Exception as e:
             self.get_logger().error(f"확인 단계 에러: {e}")
             return False
 
     def listen_for_menu_only(self):
-        """메뉴만 다시 입력받기 (이름은 유지, while 루프 - 재귀 호출 없음)"""
-        while True:
-            try:
-                self.get_logger().info("메뉴를 다시 말해주세요 (5초)...")
+        """메뉴만 다시 입력받기 (이름은 유지)"""
+        try:
+            self.get_logger().info("메뉴를 다시 말해주세요 (5초)...")
 
-                audio = sd.rec(
-                    int(self.duration * self.samplerate),
-                    samplerate=self.samplerate,
-                    channels=1,
-                    dtype="int16",
-                )
-                sd.wait()
-                self.get_logger().info("녹음 완료, STT 처리 중...")
+            audio = sd.rec(
+                int(self.duration * self.samplerate),
+                samplerate=self.samplerate,
+                channels=1,
+                dtype="int16",
+            )
+            sd.wait()
+            self.get_logger().info("녹음 완료, STT 처리 중...")
 
-                menu_hint = ", ".join(set([m.replace(" ", "") for m in self.valid_menus]))
-                prompt = f"바텐더 음료 주문입니다. 가능한 메뉴: {menu_hint}"
+            # 메뉴 힌트 생성 (STT 정확도 향상)
+            menu_hint = ", ".join(set([m.replace(" ", "") for m in self.valid_menus]))
+            prompt = f"바텐더 음료 주문입니다. 가능한 메뉴: {menu_hint}"
 
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
-                    wav.write(temp_wav.name, self.samplerate, audio)
-                    with open(temp_wav.name, "rb") as f:
-                        transcript = self.openai_client.audio.transcriptions.create(
-                            model="gpt-4o-mini-transcribe",
-                            file=f,
-                            prompt=prompt,
-                            language="ko",
-                        )
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
+                wav.write(temp_wav.name, self.samplerate, audio)
+                with open(temp_wav.name, "rb") as f:
+                    transcript = self.openai_client.audio.transcriptions.create(
+                        model="gpt-4o-mini-transcribe",
+                        file=f,
+                        prompt=prompt,
+                        language="ko",
+                    )
 
-                line = transcript.text
-                self.get_logger().info(f"STT 결과: {line}")
+            line = transcript.text
+            self.get_logger().info(f"STT 결과: {line}")
 
-                nouns = self.komoran.nouns(line)
-                stop_words = ['안녕', '이름', '잔', '메뉴', '주문']
-                filtered = [n for n in nouns if not any(word in n for word in stop_words)]
+            # 명사 추출 (메뉴만, 재사용)
+            nouns = self.komoran.nouns(line)
+            stop_words = ['안녕', '이름', '잔', '메뉴', '주문']
+            filtered = [n for n in nouns if not any(word in n for word in stop_words)]
 
-                if not filtered:
-                    self.get_logger().warn("메뉴 인식 실패. 처음부터 다시 시도해주세요.")
-                    self.reset_state()
-                    return
+            #self.get_logger().info(f"명사: {nouns} → 필터: {filtered}")
 
-                #======================== 기분에 따른 메뉴 추천 ============================
-                if '추천' in filtered or '기분' in filtered:
-                    result = self.detect_feel(line)
-                    label = result[0]['label']
-                    score = result[0]['score']
-
-                    if label == 'negative' and score > 0.6:
-                        menu = random.choice(self.negative_menu)
-                        self.get_logger().info(f"(n) {menu} 를 추천 드립니다.")
-                    elif label == 'positive' and score > 0.6:
-                        menu = random.choice(self.positive_menu)
-                        self.get_logger().info(f"(p) {menu} 를 추천 드립니다.")
-                    else:
-                        menu = ""
-                else:
-                    menu = " ".join(filtered)
-                    self.get_logger().info(f"선택하신 메뉴 : {menu}")
-                #======================== 기분에 따른 메뉴 추천 ============================
-
-                valid_menu = self.validate_menu(menu)
-                if valid_menu:
-                    if self.enable_confirmation:
-                        if not self.ask_confirmation(self.current_customer, valid_menu):
-                            self.get_logger().warn("다시 입력해주세요.")
-                            continue  # while 루프 처음으로 (재귀 X)
-
-                    self.current_menu = valid_menu
-                    self.get_logger().info(f"=== 메뉴 확인: {valid_menu} ===")
-                    self.start_sequence()
-                    return  # 시퀀스 시작 후 루프 종료
-                else:
-                    self.get_logger().warn(f"'{menu}'은(는) 잘못된 메뉴입니다. 다시 말해주세요.")
-                    self.get_logger().info(f"가능한 메뉴: {', '.join([m for m in self.valid_menus if ' ' in m])}")
-                    continue  # while 루프 처음으로 (재귀 X)
-
-            except Exception as e:
-                self.get_logger().error(f"STT Error: {e}")
+            if not filtered:
+                self.get_logger().warn("메뉴 인식 실패. 처음부터 다시 시도해주세요.")
                 self.reset_state()
                 return
+            
+            #======================== 기분에 따른 메뉴 추천 ============================
+            if '추천' in filtered or '기분' in filtered:
+                
+                result = self.detect_feel(line)
+                label = result[0]['label']
+                score = result[0]['score']
+
+                if label == 'negative' and score > 0.6 :
+                    menu = random.choice(self.negative_menu)
+                    self.get_logger().info(f"(n) {menu} 를 추천 드립니다.")
+                elif label == 'positive' and score > 0.6 :
+                    menu = random.choice(self.positive_menu)
+                    self.get_logger().info(f"(p) {menu} 를 추천 드립니다.")
+                else:
+                    menu = ""
+            else:
+                # 일반 메뉴 주문 시 메뉴 변수 지정
+                menu = " ".join(filtered)
+                self.get_logger().info(f"선택하신 메뉴 : {menu}")
+            #======================== 기분에 따른 메뉴 추천 ============================
+            
+
+            # 메뉴 검증
+            valid_menu = self.validate_menu(menu)
+            if valid_menu:
+                # 확인 단계 (enable_confirmation이 True일 때만)
+                if self.enable_confirmation:
+                    if not self.ask_confirmation(self.current_customer, valid_menu):
+                        self.get_logger().warn("❌ 다시 입력해주세요.")
+                        self.listen_for_menu_only()
+                        return
+
+                self.current_menu = valid_menu
+                self.get_logger().info(f"=== 메뉴 확인: {valid_menu} ===")
+                self.start_sequence()
+            else:
+                self.get_logger().warn(f"❌ '{menu}'은(는) 잘못된 메뉴입니다. 다시 말해주세요.")
+                self.get_logger().info(f"📋 가능한 메뉴: {', '.join([m for m in self.valid_menus if ' ' in m])}")
+                # 재귀적으로 메뉴만 다시 받기
+                self.listen_for_menu_only()
+
+        except Exception as e:
+            self.get_logger().error(f"STT Error: {e}")
+            self.reset_state()
 
     def start_sequence(self):
         """모션 시퀀스 시작"""
@@ -573,11 +583,11 @@ class SupervisorNode(Node):
         self.current_index = 0
         self.get_logger().info("Ready for next customer...")
 
-        # 자동 재시작: 플래그만 설정 → 타이머(check_wakeup)에서 처리
-        # on_result 콜백 안에서 listen_and_process()를 직접 호출하면
-        # SingleThreadedExecutor의 콜백 처리가 꼬여서 2사이클부터 멈춤
+        # 자동 재시작 옵션
         if auto_restart:
-            self._auto_restart_pending = True
+            self.get_logger().info("🔄 자동으로 다음 주문 받기 시작...")
+            self.is_running = True
+            self.listen_and_process()
 
 
 def main(args=None):
