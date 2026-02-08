@@ -7,7 +7,7 @@ shake_node - 쉐이킹 제거, 컵 집기 + 고객 전달 전용
 import time
 import rclpy
 from rclpy.node import Node
-from rclpy.action import ActionServer
+from rclpy.action import ActionServer, GoalResponse
 from rclpy.action.server import ServerGoalHandle
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -76,6 +76,8 @@ class ShakeController(Node):
             Motion,
             'shake/motion',
             self.execute_callback,
+            goal_callback=self.goal_callback,
+            handle_accepted_callback=self.handle_accepted_callback,
             callback_group=self._callback_group
         )
 
@@ -92,18 +94,20 @@ class ShakeController(Node):
 
         self.JOINT_HOME = [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]
 
-        # TCP 설정
-        self.set_robot_tcp()
-
         self.get_logger().info("Shake Action Server ready (shake/motion)")
 
-    def _call_sync(self, client, request, timeout=30.0):
-        """Executor-safe 동기 서비스 호출.
+    def goal_callback(self, goal_request):
+        """Goal 수신 여부 확인용 콜백"""
+        self.get_logger().info(f"📨 goal_callback 호출됨: {goal_request.motion_name}")
+        self.get_logger().info(f"   is_running={self.is_running}")
+        return GoalResponse.ACCEPT
 
-        rclpy.spin_until_future_complete 대신 사용합니다.
-        threading.Event 기반으로 MultiThreadedExecutor 콜백 내에서도
-        데드락 없이 안전하게 동작합니다.
-        """
+    def handle_accepted_callback(self, goal_handle):
+        """Goal 수락 후 execute_callback 디스패치"""
+        self.get_logger().info("✅ handle_accepted_callback 호출됨 → execute() 시작")
+        goal_handle.execute()
+
+    def _call_sync(self, client, request, timeout=30.0):
         event = threading.Event()
         response = [None]
 
@@ -123,12 +127,6 @@ class ShakeController(Node):
 
         self.get_logger().warn(f"Service call timeout ({timeout}s)")
         return None
-
-    def set_robot_tcp(self):
-        if self.set_tool_client.wait_for_service(timeout_sec=1.0):
-            req = SetCurrentTool.Request()
-            req.name = ROBOT_TCP
-            self.set_tool_client.call_async(req)
 
     def execute_callback(self, goal_handle: ServerGoalHandle):
         """Action 실행 콜백"""
