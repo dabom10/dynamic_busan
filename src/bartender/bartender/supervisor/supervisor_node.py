@@ -34,6 +34,7 @@ from dotenv import load_dotenv
 from konlpy.tag import Komoran
 
 from difflib import get_close_matches
+import time
 
 
 # wakeup
@@ -74,6 +75,14 @@ class SupervisorNode(Node):
         self.is_running = False
         self.current_customer = None
         self.current_menu = None  # 현재 주문 메뉴 (cup_pick에 전달)
+
+        # 메뉴만 대기 상태 추가
+        self.waiting_for_menu = False
+        
+        # Wakeup 중복 감지 방지용 - 타임스탬프 기반 강제 간격
+        self.wakeup_enabled = True  # wakeup 체크 활성화 플래그
+        self.last_wakeup_time = 0
+        self.min_wakeup_interval = 3.0  # 최소 3초 간격 (필요시 조절 가능)
 
         # 유효한 메뉴 목록 (recipe.json의 recipe_id = DB의 menu_seq)
         self.valid_menus = [
@@ -149,10 +158,84 @@ class SupervisorNode(Node):
         if self.is_running:
             return
 
+        # wakeup 체크가 비활성화되어 있으면 스킵
+        if not self.wakeup_enabled:
+            return
+
+        # 타임스탬프 기반 간격 체크 (최소 간격 미달 시 무시)
+        current_time = time.time()
+        if current_time - self.last_wakeup_time < self.min_wakeup_interval:
+            # 간격이 너무 짧으면 무시 (로그 없이 조용히 스킵)
+            return
+
         if self.wakeup.is_wakeup():
             self.get_logger().info("Wakeup detected!")
+            
+            # CRITICAL: wakeup 체크 즉시 비활성화 (중복 감지 완전 차단)
+            self.wakeup_enabled = False
+            self.last_wakeup_time = current_time
+            
+            # 강제 대기 + 버퍼 완전 클리어 (wakeup 신호 완전 제거)
+            self.flush_wakeup_signal()
+            
+            # Wakeup detector 재초기화 시도
+            self.reinitialize_wakeup_detector()
+            
             self.is_running = True
-            self.listen_and_process()
+            
+            # 메뉴만 대기 상태인지 확인
+            if self.waiting_for_menu:
+                self.get_logger().info("메뉴 재입력 모드로 전환...")
+                self.listen_for_menu_only()
+            else:
+                self.listen_and_process()
+
+    def reinitialize_wakeup_detector(self):
+        """Wakeup detector 재초기화 (내부 상태 리셋)"""
+        try:
+            self.get_logger().info("🔄 Wakeup detector 재초기화 중...")
+            
+            # 방법 1: 새로운 WakeupWord 객체 생성 (가장 확실한 방법)
+            old_wakeup = self.wakeup
+            self.wakeup = WakeupWord(self.mic.config.buffer_size)
+            self.wakeup.set_stream(self.mic.stream)
+            del old_wakeup
+            
+            self.get_logger().info("✅ Wakeup detector 재초기화 완료")
+        except Exception as e:
+            self.get_logger().warn(f"Wakeup detector 재초기화 실패: {e}")
+
+    def flush_wakeup_signal(self):
+        """Wakeup 신호 완전 제거 - 버퍼 클리어 + 대기"""
+        self.get_logger().info("🧹 Wakeup 신호 완전 제거 중...")
+        
+        # 1차: 즉시 버퍼 비우기
+        self.clear_mic_buffer()
+        
+        # 2차: 1초 대기 (wakeup word가 마이크에서 완전히 사라지도록)
+        time.sleep(1.0)
+        
+        # 3차: 다시 버퍼 비우기 (대기 중 쌓인 데이터 제거)
+        self.clear_mic_buffer()
+        
+        # 4차: 0.5초 추가 대기
+        time.sleep(0.5)
+        
+        # 5차: 최종 버퍼 클리어
+        self.clear_mic_buffer()
+        
+        self.get_logger().info("✅ Wakeup 신호 제거 완료")
+
+    def clear_mic_buffer(self):
+        """마이크 버퍼 비우기 (wakeup word 잔여 신호 제거)"""
+        try:
+            if self.mic.stream and self.mic.stream.is_active():
+                available = self.mic.stream.get_read_available()
+                if available > 0:
+                    self.mic.stream.read(available, exception_on_overflow=False)
+                    self.get_logger().debug(f"Cleared {available} samples from mic buffer")
+        except Exception as e:
+            self.get_logger().warn(f"Failed to clear mic buffer: {e}")
 
     def listen_and_process(self):
         """STT 처리"""
@@ -202,8 +285,7 @@ class SupervisorNode(Node):
 
             if not filtered:
                 self.get_logger().warn("이름 인식 실패. 다시 시도해주세요.")
-                self.is_running = False
-                self.listen_for_menu_only()
+                self.request_menu_retry()
                 return
 
             # 메뉴를 먼저 찾고, 그 이전을 이름으로 처리
@@ -244,8 +326,7 @@ class SupervisorNode(Node):
             if len(name) < 2 or len(name) > 5:
                 self.get_logger().warn(f"⚠️  인식된 이름 '{name}'의 길이가 비정상적입니다 (2-5글자 권장).")
                 self.get_logger().warn("다시 말씀해주세요.")
-                self.is_running = False
-                self.listen_for_menu_only()
+                self.request_menu_retry()
                 return
 
             #======================== 기분에 따른 메뉴 추천 ============================
@@ -280,7 +361,7 @@ class SupervisorNode(Node):
             if not menu:
                 self.get_logger().warn(f"이름 '{name}'은(는) 확인되었습니다. 메뉴를 말해주세요.")
                 self.get_logger().info(f"📋 가능한 메뉴: {', '.join([m for m in self.valid_menus if ' ' in m])}")
-                self.listen_for_menu_only()
+                self.request_menu_retry()
                 return
 
             # 메뉴 검증
@@ -290,7 +371,7 @@ class SupervisorNode(Node):
                 if self.enable_confirmation:
                     if not self.ask_confirmation(name, valid_menu):
                         self.get_logger().warn("❌ 다시 입력해주세요.")
-                        self.listen_for_menu_only()
+                        self.request_menu_retry()
                         return
 
                 self.current_menu = valid_menu
@@ -307,11 +388,11 @@ class SupervisorNode(Node):
             else:
                 self.get_logger().warn(f"❌ '{menu}'은(는) 잘못된 메뉴입니다. 다시 말해주세요.")
                 self.get_logger().info(f"📋 가능한 메뉴: {', '.join([m for m in self.valid_menus if ' ' in m])}")
-                self.listen_for_menu_only()
+                self.request_menu_retry()
 
         except Exception as e:
             self.get_logger().error(f"STT Error: {e}")
-            self.is_running = False
+            self.reset_state()
 
     def save_to_database(self, name: str, menu: str):
         """DB 저장"""
@@ -386,16 +467,24 @@ class SupervisorNode(Node):
                 return True
             else:
                 self.get_logger().warn("❌ 주문이 취소되었습니다.")
-                self.listen_for_menu_only()
                 return False
 
         except Exception as e:
             self.get_logger().error(f"확인 단계 에러: {e}")
             return False
 
+    def request_menu_retry(self):
+        """메뉴 재입력 요청 - wakeup word 대기 상태로 전환"""
+        self.waiting_for_menu = True
+        self.get_logger().info("🎤 메뉴를 다시 입력하려면 wakeup word를 말해주세요...")
+        self.reset_state(keep_customer=True)
+
     def listen_for_menu_only(self):
         """메뉴만 다시 입력받기 (이름은 유지)"""
         try:
+            # 메뉴 대기 상태 해제
+            self.waiting_for_menu = False
+
             self.get_logger().info("메뉴를 다시 말해주세요 (5초)...")
 
             audio = sd.rec(
@@ -465,7 +554,7 @@ class SupervisorNode(Node):
                 if self.enable_confirmation:
                     if not self.ask_confirmation(self.current_customer, valid_menu):
                         self.get_logger().warn("❌ 다시 입력해주세요.")
-                        self.listen_for_menu_only()
+                        self.request_menu_retry()
                         return
 
                 self.current_menu = valid_menu
@@ -474,8 +563,8 @@ class SupervisorNode(Node):
             else:
                 self.get_logger().warn(f"❌ '{menu}'은(는) 잘못된 메뉴입니다. 다시 말해주세요.")
                 self.get_logger().info(f"📋 가능한 메뉴: {', '.join([m for m in self.valid_menus if ' ' in m])}")
-                # 재귀적으로 메뉴만 다시 받기
-                self.listen_for_menu_only()
+                # wakeup word 대기로 전환
+                self.request_menu_retry()
 
         except Exception as e:
             self.get_logger().error(f"STT Error: {e}")
@@ -561,26 +650,40 @@ class SupervisorNode(Node):
         self.get_logger().info(f"📍 다음 인덱스: {self.current_index}")
         self.execute_next()
 
-    def reset_state(self, auto_restart=False):
+    def reset_state(self, auto_restart=False, keep_customer=False):
         """상태 초기화
 
         Args:
             auto_restart: True면 자동으로 다음 주문 받기 시작
+            keep_customer: True면 고객 이름 유지 (메뉴 재입력용)
         """
         # 마이크 스트림 버퍼 비우기 (sd.rec 사용 후 PyAudio 버퍼 꼬임 방지)
-        try:
-            if self.mic.stream and self.mic.stream.is_active():
-                available = self.mic.stream.get_read_available()
-                if available > 0:
-                    self.mic.stream.read(available, exception_on_overflow=False)
-        except Exception:
-            pass
+        self.clear_mic_buffer()
 
         self.is_running = False
-        self.current_customer = None
+        
+        # 고객 정보 유지 여부 결정
+        if not keep_customer:
+            self.current_customer = None
+            self.waiting_for_menu = False
+        
         self.current_menu = None
         self.current_index = 0
-        self.get_logger().info("Ready for next customer...")
+        
+        # CRITICAL: wakeup 체크 재활성화 (지연 실행으로 안정화)
+        if not auto_restart:
+            # 즉시 재활성화하지 않고 약간의 딜레이 후 활성화
+            self.get_logger().info("🔓 Wakeup 체크 재활성화 준비 중...")
+            time.sleep(0.5)  # 0.5초 대기
+            self.clear_mic_buffer()  # 한 번 더 버퍼 클리어
+        
+        self.wakeup_enabled = True
+        self.get_logger().info("🔓 Wakeup 체크 재활성화 완료")
+        
+        if keep_customer:
+            self.get_logger().info(f"Ready for menu input (Customer: {self.current_customer})...")
+        else:
+            self.get_logger().info("Ready for next customer...")
 
         # 자동 재시작 옵션
         if auto_restart:
